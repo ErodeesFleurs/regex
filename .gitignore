@@ -1,0 +1,4 @@
+.envrc
+.direnv/
+.agents/
+.zig-cache/
