@@ -2,3 +2,4 @@
 .direnv/
 .agents/
 .zig-cache/
+zig-out/
