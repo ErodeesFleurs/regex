@@ -1,5 +1,7 @@
-.envrc
-.direnv/
-.agents/
-.zig-cache/
-zig-out/
+/.envrc
+/.direnv/
+/.zig-cache/
+/zig-out/
+
+/.agents/
+/AGENTS.md
