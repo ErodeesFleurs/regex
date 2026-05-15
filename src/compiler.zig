@@ -194,6 +194,18 @@ pub const Compiler = struct {
                     self.bytecode.patch(split_idx, end_pos);
                 }
             },
+            .Backref => {
+                _ = try self.bytecode.emit(.{
+                    .opcode = .Backref,
+                    .backref_group = node.value.?,
+                });
+            },
+            .WordBoundary => {
+                _ = try self.bytecode.emit(.{ .opcode = .WordBoundary });
+            },
+            .NotWordBoundary => {
+                _ = try self.bytecode.emit(.{ .opcode = .NotWordBoundary });
+            },
             .Empty => {
                 // 空表达式不生成指令
             },

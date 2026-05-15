@@ -26,6 +26,13 @@ pub const OpCode = enum(u8) {
     AssertBackward,
     AssertBackwardEnd,
     AssertBackwardNegative,
+
+    // 反向引用
+    Backref,
+
+    // 单词边界
+    WordBoundary,
+    NotWordBoundary,
 };
 
 pub const Instruction = struct {
@@ -34,6 +41,7 @@ pub const Instruction = struct {
     char_class: ?*CharClass = null,
     target: ?usize = null,
     save_slot: ?usize = null,
+    backref_group: ?usize = null,
     
     pub fn format(self: Instruction, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.opcode) {
@@ -46,6 +54,15 @@ pub const Instruction = struct {
             .Save => try writer.print("Save({})", .{self.save_slot.?}),
             .AssertStart => try writer.print("AssertStart", .{}),
             .AssertEnd => try writer.print("AssertEnd", .{}),
+            .AssertForward => try writer.print("AssertForward", .{}),
+            .AssertForwardEnd => try writer.print("AssertForwardEnd", .{}),
+            .AssertForwardNegative => try writer.print("AssertForwardNegative", .{}),
+            .AssertBackward => try writer.print("AssertBackward", .{}),
+            .AssertBackwardEnd => try writer.print("AssertBackwardEnd", .{}),
+            .AssertBackwardNegative => try writer.print("AssertBackwardNegative", .{}),
+            .Backref => try writer.print("Backref({})", .{self.backref_group.?}),
+            .WordBoundary => try writer.print("WordBoundary", .{}),
+            .NotWordBoundary => try writer.print("NotWordBoundary", .{}),
         }
     }
 };

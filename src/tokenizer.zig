@@ -30,6 +30,13 @@ pub const TokenType = enum {
     Whitespace,    // \s
     NotWhitespace, // \S
     
+    // 单词边界
+    WordBoundary,     // \b
+    NotWordBoundary,  // \B
+    
+    // 反向引用
+    Backref,       // \1, \2, ...
+    
     // 量词
     LBrace,        // {
     RBrace,        // }
@@ -94,11 +101,14 @@ pub const Tokenizer = struct {
                 'W' => .NotWord,
                 's' => .Whitespace,
                 'S' => .NotWhitespace,
+                'b' => .WordBoundary,
+                'B' => .NotWordBoundary,
                 't' => .Literal,
                 'n' => .Literal,
                 'r' => .Literal,
                 '\\' => .Literal,
                 '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => .Literal,
+                '0'...'9' => .Backref,
                 else => .Invalid,
             };
             

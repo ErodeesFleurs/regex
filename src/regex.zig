@@ -28,7 +28,7 @@ pub const Regex = struct {
         const bytecode = try compiler.compile(ast.?);
         
         return Regex{
-            .vm = Vm.init(allocator, bytecode),
+            .vm = Vm.init(allocator, bytecode, options),
             .allocator = allocator,
             .options = options,
         };
@@ -99,9 +99,29 @@ pub const Regex = struct {
                 try result.appendSlice(self.allocator, text[last_end..match_result.start]);
             }
             
-            // 添加替换文本
-            try result.appendSlice(self.allocator, replacement);
-            
+            // 添加替换文本（支持 $0, $1, ... 和 $$）
+            var rep_i: usize = 0;
+            while (rep_i < replacement.len) {
+                if (replacement[rep_i] == '$' and rep_i + 1 < replacement.len) {
+                    if (replacement[rep_i + 1] == '$') {
+                        try result.append(self.allocator, '$');
+                        rep_i += 2;
+                    } else if (std.ascii.isDigit(replacement[rep_i + 1])) {
+                        const group_idx = replacement[rep_i + 1] - '0';
+                        if (match_result.getGroup(text, group_idx)) |group_text| {
+                            try result.appendSlice(self.allocator, group_text);
+                        }
+                        rep_i += 2;
+                    } else {
+                        try result.append(self.allocator, replacement[rep_i]);
+                        rep_i += 1;
+                    }
+                } else {
+                    try result.append(self.allocator, replacement[rep_i]);
+                    rep_i += 1;
+                }
+            }
+
             last_end = match_result.end;
             pos = match_result.end;
             

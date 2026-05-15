@@ -20,6 +20,9 @@ pub const NodeType = enum {
     AssertForwardNegative, // 负向前瞻 (?!...)
     AssertBackward,     // 正向后顾 (?<=...)
     AssertBackwardNegative, // 负向后顾 (?<!...)
+    Backref,       // 反向引用 \1, \2, ...
+    WordBoundary,     // 单词边界 \b
+    NotWordBoundary,  // 非单词边界 \B
     Empty,         // 空表达式
 };
 
@@ -343,11 +346,42 @@ pub const Parser = struct {
                 };
                 return node;
             },
+            .WordBoundary, .NotWordBoundary => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = switch (token.type) {
+                        .WordBoundary => .WordBoundary,
+                        .NotWordBoundary => .NotWordBoundary,
+                        else => unreachable,
+                    },
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
             .LParen => {
                 return try self.parseGroup();
             },
             .LBracket => {
                 return try self.parseCharClass();
+            },
+            .Backref => {
+                _ = self.tokenizer.nextToken();
+                const group_idx = try std.fmt.parseInt(usize, token.value[1..], 10);
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .Backref,
+                    .value = @intCast(group_idx),
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
             },
             .Caret => {
                 _ = self.tokenizer.nextToken();

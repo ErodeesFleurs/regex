@@ -3,6 +3,9 @@ const Io = std.Io;
 
 // 导出公共 API
 pub const Regex = @import("regex.zig").Regex;
+
+// 引入公认正确性测试套件（模块测试由 Zig 测试运行器自动发现）
+const _correctness = @import("test_correctness/root.zig");
 pub const MatchResult = @import("vm.zig").MatchResult;
 pub const RegexOptions = @import("options.zig").RegexOptions;
 pub const Tokenizer = @import("tokenizer.zig").Tokenizer;
