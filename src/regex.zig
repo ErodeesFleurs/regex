@@ -78,13 +78,59 @@ pub const Regex = struct {
         return results;
     }
     
+    fn appendReplacement(self: *Regex, result: *std.ArrayList(u8), text: []const u8, match_result: MatchResult, replacement: []const u8) !void {
+        // 添加匹配前的文本
+        if (match_result.start > 0) {
+            try result.appendSlice(self.allocator, text[0..match_result.start]);
+        }
+        // 添加替换文本（支持 $0, $1, ... 和 $$）
+        var rep_i: usize = 0;
+        while (rep_i < replacement.len) {
+            if (replacement[rep_i] == '$' and rep_i + 1 < replacement.len) {
+                if (replacement[rep_i + 1] == '$') {
+                    try result.append(self.allocator, '$');
+                    rep_i += 2;
+                } else if (std.ascii.isDigit(replacement[rep_i + 1])) {
+                    const group_idx = replacement[rep_i + 1] - '0';
+                    if (match_result.getGroup(text, group_idx)) |group_text| {
+                        try result.appendSlice(self.allocator, group_text);
+                    }
+                    rep_i += 2;
+                } else {
+                    try result.append(self.allocator, replacement[rep_i]);
+                    rep_i += 1;
+                }
+            } else {
+                try result.append(self.allocator, replacement[rep_i]);
+                rep_i += 1;
+            }
+        }
+    }
+
     pub fn replace(self: *Regex, text: []const u8, replacement: []const u8) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(self.allocator);
-        
+
+        var match_result_opt = try self.vm.find(text);
+        if (match_result_opt) |*match_result| {
+            defer match_result.deinit();
+            try self.appendReplacement(&result, text, match_result.*, replacement);
+            try result.appendSlice(self.allocator, text[match_result.end..]);
+            return result.toOwnedSlice(self.allocator);
+        }
+
+        // 无匹配，返回原文本
+        try result.appendSlice(self.allocator, text);
+        return result.toOwnedSlice(self.allocator);
+    }
+
+    pub fn replaceAll(self: *Regex, text: []const u8, replacement: []const u8) ![]u8 {
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(self.allocator);
+
         var last_end: usize = 0;
         var pos: usize = 0;
-        
+
         while (pos <= text.len) {
             var match_result = try self.vm.exec(text, pos);
             if (!match_result.matched) {
@@ -92,63 +138,39 @@ pub const Regex = struct {
                 pos += 1;
                 continue;
             }
-            defer match_result.deinit();
-            
+
             // 添加匹配前的文本
             if (match_result.start > last_end) {
                 try result.appendSlice(self.allocator, text[last_end..match_result.start]);
             }
-            
-            // 添加替换文本（支持 $0, $1, ... 和 $$）
-            var rep_i: usize = 0;
-            while (rep_i < replacement.len) {
-                if (replacement[rep_i] == '$' and rep_i + 1 < replacement.len) {
-                    if (replacement[rep_i + 1] == '$') {
-                        try result.append(self.allocator, '$');
-                        rep_i += 2;
-                    } else if (std.ascii.isDigit(replacement[rep_i + 1])) {
-                        const group_idx = replacement[rep_i + 1] - '0';
-                        if (match_result.getGroup(text, group_idx)) |group_text| {
-                            try result.appendSlice(self.allocator, group_text);
-                        }
-                        rep_i += 2;
-                    } else {
-                        try result.append(self.allocator, replacement[rep_i]);
-                        rep_i += 1;
-                    }
-                } else {
-                    try result.append(self.allocator, replacement[rep_i]);
-                    rep_i += 1;
-                }
-            }
+
+            // 添加替换文本
+            try self.appendReplacement(&result, text, match_result, replacement);
 
             last_end = match_result.end;
             pos = match_result.end;
-            
+            match_result.deinit();
+
             if (match_result.start == match_result.end) {
                 pos += 1;
             }
         }
-        
+
         // 添加剩余的文本
         if (last_end < text.len) {
             try result.appendSlice(self.allocator, text[last_end..]);
         }
-        
+
         return result.toOwnedSlice(self.allocator);
-    }
-    
-    pub fn replaceAll(self: *Regex, text: []const u8, replacement: []const u8) ![]u8 {
-        return try self.replace(text, replacement);
     }
     
     pub fn split(self: *Regex, text: []const u8) !std.ArrayList([]const u8) {
         var results: std.ArrayList([]const u8) = .empty;
         errdefer results.deinit(self.allocator);
-        
+
         var last_end: usize = 0;
         var pos: usize = 0;
-        
+
         while (pos <= text.len) {
             var match_result = try self.vm.exec(text, pos);
             if (!match_result.matched) {
@@ -157,25 +179,21 @@ pub const Regex = struct {
                 continue;
             }
             defer match_result.deinit();
-            
-            // 添加匹配前的文本
-            if (match_result.start > last_end) {
-                try results.append(self.allocator, text[last_end..match_result.start]);
-            }
-            
+
+            // 添加匹配前的文本（包括空字符串）
+            try results.append(self.allocator, text[last_end..match_result.start]);
+
             last_end = match_result.end;
             pos = match_result.end;
-            
+
             if (match_result.start == match_result.end) {
                 pos += 1;
             }
         }
-        
-        // 添加剩余的文本
-        if (last_end < text.len) {
-            try results.append(self.allocator, text[last_end..]);
-        }
-        
+
+        // 添加剩余的文本（包括空字符串）
+        try results.append(self.allocator, text[last_end..]);
+
         return results;
     }
 };
@@ -287,7 +305,7 @@ test "regex replace" {
     const result = try regex.replace("aabbaaa", "X");
     defer allocator.free(result);
     
-    try std.testing.expectEqualStrings("XbbX", result);
+    try std.testing.expectEqualStrings("Xbbaaa", result);
 }
 
 test "regex split" {

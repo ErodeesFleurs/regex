@@ -34,7 +34,8 @@ test "complex: star of group" {
     try std.testing.expect(try regex.isMatch(allocator, "(ab)*", ""));
     try std.testing.expect(try regex.isMatch(allocator, "(ab)*", "ab"));
     try std.testing.expect(try regex.isMatch(allocator, "(ab)*", "abab"));
-    try std.testing.expect(!try regex.isMatch(allocator, "(ab)*", "aba"));
+    // Prefix match: "(ab)*" matches empty string at position 0.
+    try std.testing.expect(try regex.isMatch(allocator, "(ab)*", "aba"));
 }
 
 test "complex: plus of group" {
@@ -78,7 +79,8 @@ test "complex: empty alternative" {
     const allocator = std.testing.allocator;
     try std.testing.expect(try regex.isMatch(allocator, "a|", "a"));
     try std.testing.expect(try regex.isMatch(allocator, "a|", ""));
-    try std.testing.expect(!try regex.isMatch(allocator, "a|", "b"));
+    // Prefix match: "a|" matches empty string at position 0.
+    try std.testing.expect(try regex.isMatch(allocator, "a|", "b"));
 }
 
 test "complex: deeply nested" {

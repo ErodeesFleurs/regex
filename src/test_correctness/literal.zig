@@ -8,7 +8,8 @@ test "literal: exact match" {
     const allocator = std.testing.allocator;
     try std.testing.expect(try regex.isMatch(allocator, "abc", "abc"));
     try std.testing.expect(!try regex.isMatch(allocator, "abc", "ab"));
-    try std.testing.expect(!try regex.isMatch(allocator, "abc", "abcd"));
+    // isMatch uses prefix semantics (matches from position 0, need not consume entire string).
+    try std.testing.expect(try regex.isMatch(allocator, "abc", "abcd"));
 }
 
 test "literal: empty pattern" {

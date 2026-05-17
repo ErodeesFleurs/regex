@@ -103,12 +103,24 @@ pub const Parser = struct {
     }
 
     pub fn parse(self: *Parser) !?*AstNode {
-        const node = try self.parseExpression();
+        var node = try self.parseExpression();
 
         // 确保已经到达输入末尾
         const token = self.tokenizer.nextToken();
         if (token.type != .EOF) {
             return error.UnexpectedToken;
+        }
+
+        if (node == null) {
+            node = try self.allocator.create(AstNode);
+            node.?.* = .{
+                .type = .Empty,
+                .value = null,
+                .left = null,
+                .right = null,
+                .char_class = null,
+                .group_index = null,
+            };
         }
 
         return node;
@@ -124,10 +136,18 @@ pub const Parser = struct {
 
             _ = self.tokenizer.nextToken(); // 消费 '|'
 
-            const right = try self.parseTerm() orelse {
-                left.deinit(self.allocator);
-                return error.EmptyAlternative;
-            };
+            var right = try self.parseTerm();
+            if (right == null) {
+                right = try self.allocator.create(AstNode);
+                right.?.* = .{
+                    .type = .Empty,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+            }
 
             const node = try self.allocator.create(AstNode);
             node.* = .{

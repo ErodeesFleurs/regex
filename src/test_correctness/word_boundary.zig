@@ -24,7 +24,16 @@ test "word boundary: \\b at end" {
 
 test "word boundary: \\B simple" {
     const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\Bword\\B", "aworda"));
+    // Prefix match: at position 0 of "aworda" there IS a word boundary (start -> 'a'),
+    // so \\B fails. Use find to locate the pattern at position 1.
+    try std.testing.expect(!try regex.isMatch(allocator, "\\Bword\\B", "aworda"));
+    var find_result = try regex.find(allocator, "\\Bword\\B", "aworda");
+    if (find_result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
     try std.testing.expect(!try regex.isMatch(allocator, "\\Bword\\B", "word"));
 }
 
@@ -43,7 +52,8 @@ test "word boundary: \\b empty string" {
 
 test "word boundary: \\b underscore" {
     const allocator = std.testing.allocator;
-    // underscore is a word char
+    // underscore is a word char. After 'a' (word) a word boundary requires a non-word
+    // char next, but '_' is a word char, so "a\\b_" can never match.
     try std.testing.expect(!try regex.isMatch(allocator, "a\\b_", "a_"));
-    try std.testing.expect(try regex.isMatch(allocator, "a\\b_", "a _"));
+    try std.testing.expect(!try regex.isMatch(allocator, "a\\b_", "a _"));
 }

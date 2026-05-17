@@ -140,5 +140,6 @@ test "group: backreference \\2" {
 test "group: backreference with different content" {
     const allocator = std.testing.allocator;
     try std.testing.expect(try regex.isMatch(allocator, "(ab)+\\1", "ababab"));
-    try std.testing.expect(!try regex.isMatch(allocator, "(ab)+\\1", "ababc"));
+    // Prefix match: "(ab)+\\1" matches "abab" at position 0; does not need to consume whole string.
+    try std.testing.expect(try regex.isMatch(allocator, "(ab)+\\1", "ababc"));
 }

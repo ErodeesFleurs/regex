@@ -322,6 +322,8 @@ pub const Vm = struct {
                 .Match => {
                     matched = true;
                     match_end = pos;
+                    captures.items[0] = start_pos;
+                    captures.items[1] = pos;
                     break;
                 },
                 .Backref => {

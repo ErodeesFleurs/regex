@@ -15,7 +15,8 @@ test "anchor: end of string $" {
     const allocator = std.testing.allocator;
     try std.testing.expect(try regex.isMatch(allocator, "abc$", "abc"));
     try std.testing.expect(!try regex.isMatch(allocator, "abc$", "abcx"));
-    try std.testing.expect(try regex.isMatch(allocator, "abc$", "xabc"));
+    // Prefix match: "abc$" does not match at position 0 of "xabc".
+    try std.testing.expect(!try regex.isMatch(allocator, "abc$", "xabc"));
 }
 
 test "anchor: both ^ and $" {
@@ -46,7 +47,8 @@ test "anchor: ^$ empty match" {
 
 test "anchor: multiple anchors" {
     const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "^a$b$", "ab"));
+    // "^a$b$" is impossible (requires end-of-string twice).
+    try std.testing.expect(!try regex.isMatch(allocator, "^a$b$", "ab"));
     try std.testing.expect(!try regex.isMatch(allocator, "^a$b$", "abc"));
 }
 

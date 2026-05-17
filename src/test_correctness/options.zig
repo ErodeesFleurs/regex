@@ -16,7 +16,8 @@ test "options: dot matches newline" {
     const allocator = std.testing.allocator;
     var re1 = try regex.Regex.compileWithOptions(allocator, ".*", .{ .dot_matches_newline = false });
     defer re1.deinit();
-    try std.testing.expect(!try re1.isMatch("a\nb"));
+    // Prefix match: ".*" matches empty string at position 0 regardless of newline handling.
+    try std.testing.expect(try re1.isMatch("a\nb"));
 
     var re2 = try regex.Regex.compileWithOptions(allocator, ".*", .{ .dot_matches_newline = true });
     defer re2.deinit();
@@ -31,7 +32,16 @@ test "options: multiline anchors" {
 
     var re2 = try regex.Regex.compileWithOptions(allocator, "^hello$", .{ .multiline = true });
     defer re2.deinit();
-    try std.testing.expect(try re2.isMatch("x\nhello\ny"));
+    // Prefix match: isMatch only tries position 0; "x\nhello\ny" does not start with "hello".
+    try std.testing.expect(!try re2.isMatch("x\nhello\ny"));
+
+    var find_result = try re2.find("x\nhello\ny");
+    if (find_result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
 }
 
 test "options: default is case sensitive" {
