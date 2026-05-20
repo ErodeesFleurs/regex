@@ -110,3 +110,19 @@ test "char class: dot inside class" {
     try std.testing.expect(try regex.isMatch(allocator, "[.]", "."));
     try std.testing.expect(!try regex.isMatch(allocator, "[.]", "a"));
 }
+
+test "char class: shorthand inside class" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[\\d]", "5"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[\\d]", "a"));
+    try std.testing.expect(try regex.isMatch(allocator, "[\\w]", "_"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[\\w]", "!"));
+    try std.testing.expect(try regex.isMatch(allocator, "[\\s]", "\t"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[\\s]", "a"));
+}
+
+test "char class: negated shorthand inside class" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(!try regex.isMatch(allocator, "[\\D]", "5"));
+    try std.testing.expect(try regex.isMatch(allocator, "[\\D]", "a"));
+}

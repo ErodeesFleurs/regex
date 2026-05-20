@@ -35,7 +35,7 @@ pub const Compiler = struct {
             .Literal => {
                 _ = try self.bytecode.emit(.{
                     .opcode = .Char,
-                    .char = node.value,
+                    .char = @intCast(node.value.?),
                 });
             },
             .Any => {

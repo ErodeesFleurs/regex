@@ -44,6 +44,23 @@ test "options: multiline anchors" {
     }
 }
 
+test "options: case insensitive char class" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compileWithOptions(allocator, "[a-z]+", .{ .case_sensitive = false });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("abc"));
+    try std.testing.expect(try re.isMatch("ABC"));
+}
+
+test "options: case insensitive backref" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compileWithOptions(allocator, "(abc)\\1", .{ .case_sensitive = false });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("abcabc"));
+    try std.testing.expect(try re.isMatch("abcABC"));
+    try std.testing.expect(try re.isMatch("ABCabc"));
+}
+
 test "options: default is case sensitive" {
     const allocator = std.testing.allocator;
     try std.testing.expect(try regex.isMatch(allocator, "hello", "hello"));

@@ -103,12 +103,13 @@ pub const Tokenizer = struct {
                 'S' => .NotWhitespace,
                 'b' => .WordBoundary,
                 'B' => .NotWordBoundary,
+                '0' => .Literal,
                 't' => .Literal,
                 'n' => .Literal,
                 'r' => .Literal,
                 '\\' => .Literal,
                 '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => .Literal,
-                '0'...'9' => .Backref,
+                '1'...'9' => .Backref,
                 else => .Invalid,
             };
             

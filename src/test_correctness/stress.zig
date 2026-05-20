@@ -7,10 +7,9 @@ test "stress: long string literal match" {
     const allocator = std.testing.allocator;
     const text = "a" ** 1000;
     try std.testing.expect(try regex.isMatch(allocator, "a+", text));
-    // TODO: exact multi-digit quantifiers like {500} are not supported by the tokenizer/parser.
-    // try std.testing.expect(try regex.isMatch(allocator, "a{500}", text));
-    // try std.testing.expect(try regex.isMatch(allocator, "a{1000}", text));
-    // try std.testing.expect(!try regex.isMatch(allocator, "a{1001}", text));
+    try std.testing.expect(try regex.isMatch(allocator, "a{500}", text));
+    try std.testing.expect(try regex.isMatch(allocator, "a{1000}", text));
+    try std.testing.expect(!try regex.isMatch(allocator, "a{1001}", text));
 }
 
 test "stress: deep nesting" {

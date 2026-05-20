@@ -77,14 +77,11 @@ pub const Vm = struct {
 
         while (true) {
             if (sub_pc >= end_pc) {
-                if (sub_stack.items.len == 0) break;
-                const frame = sub_stack.pop().?;
-                sub_pc = frame.pc;
-                sub_pos = frame.pos;
-                if (frame.capture_slot) |slot| {
-                    sub_captures.items[slot] = frame.capture_old_value;
-                }
-                continue;
+                // 到达子模式末尾，认为匹配成功（即使 sub_stack 中还有未探索的分支）。
+                // 子匹配只需证明存在一条从 start_pc 到 end_pc 的成功路径。
+                sub_matched = true;
+                sub_match_end = sub_pos;
+                break;
             }
 
             const inst = self.bytecode.instructions.items[sub_pc];
@@ -187,8 +184,229 @@ pub const Vm = struct {
                         }
                     }
                 },
-                else => {
-                    // 嵌套断言在本简化实现中直接跳过
+                .Backref => {
+                    const group_idx = inst.backref_group.?;
+                    const start_slot = group_idx * 2;
+                    const end_slot = group_idx * 2 + 1;
+                    if (start_slot >= sub_captures.items.len or end_slot >= sub_captures.items.len) {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                        continue;
+                    }
+                    const group_start = sub_captures.items[start_slot];
+                    const group_end = sub_captures.items[end_slot];
+                    if (group_start == null or group_end == null) {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                        continue;
+                    }
+                    const group_text = input[group_start.?..group_end.?];
+                    const remaining = input[sub_pos..];
+                    const matches = if (self.options.case_sensitive)
+                        remaining.len >= group_text.len and std.mem.startsWith(u8, remaining, group_text)
+                    else
+                        remaining.len >= group_text.len and std.ascii.eqlIgnoreCase(remaining[0..group_text.len], group_text);
+                    if (matches) {
+                        sub_pc += 1;
+                        sub_pos += group_text.len;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .WordBoundary => {
+                    const is_word = struct {
+                        pub fn call(ch: u8) bool {
+                            return (ch >= 'a' and ch <= 'z') or
+                                (ch >= 'A' and ch <= 'Z') or
+                                (ch >= '0' and ch <= '9') or
+                                ch == '_';
+                        }
+                    }.call;
+                    const left = if (sub_pos > 0) is_word(input[sub_pos - 1]) else false;
+                    const right = if (sub_pos < input.len) is_word(input[sub_pos]) else false;
+                    if (left != right) {
+                        sub_pc += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .NotWordBoundary => {
+                    const is_word = struct {
+                        pub fn call(ch: u8) bool {
+                            return (ch >= 'a' and ch <= 'z') or
+                                (ch >= 'A' and ch <= 'Z') or
+                                (ch >= '0' and ch <= '9') or
+                                ch == '_';
+                        }
+                    }.call;
+                    const left = if (sub_pos > 0) is_word(input[sub_pos - 1]) else false;
+                    const right = if (sub_pos < input.len) is_word(input[sub_pos]) else false;
+                    if (left == right) {
+                        sub_pc += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertForward => {
+                    var depth: usize = 1;
+                    var end_pc2 = sub_pc + 1;
+                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
+                        const inst2 = self.bytecode.instructions.items[end_pc2];
+                        switch (inst2.opcode) {
+                            .AssertForward => depth += 1,
+                            .AssertForwardEnd => {
+                                depth -= 1;
+                                if (depth == 0) break;
+                            },
+                            else => {},
+                        }
+                    }
+                    const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, sub_pos);
+                    if (sub_end != null) {
+                        sub_pc = end_pc2 + 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertForwardNegative => {
+                    var depth: usize = 1;
+                    var end_pc2 = sub_pc + 1;
+                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
+                        const inst2 = self.bytecode.instructions.items[end_pc2];
+                        switch (inst2.opcode) {
+                            .AssertForwardNegative => depth += 1,
+                            .AssertForwardEnd => {
+                                depth -= 1;
+                                if (depth == 0) break;
+                            },
+                            else => {},
+                        }
+                    }
+                    const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, sub_pos);
+                    if (sub_end == null) {
+                        sub_pc = end_pc2 + 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertForwardEnd => {
+                    sub_pc += 1;
+                },
+                .AssertBackward => {
+                    var depth: usize = 1;
+                    var end_pc2 = sub_pc + 1;
+                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
+                        const inst2 = self.bytecode.instructions.items[end_pc2];
+                        switch (inst2.opcode) {
+                            .AssertBackward => depth += 1,
+                            .AssertBackwardEnd => {
+                                depth -= 1;
+                                if (depth == 0) break;
+                            },
+                            else => {},
+                        }
+                    }
+                    var success = false;
+                    var try_pos: usize = 0;
+                    while (try_pos <= sub_pos) : (try_pos += 1) {
+                        const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, try_pos);
+                        if (sub_end) |se| {
+                            if (se == sub_pos) {
+                                success = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (success) {
+                        sub_pc = end_pc2 + 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertBackwardNegative => {
+                    var depth: usize = 1;
+                    var end_pc2 = sub_pc + 1;
+                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
+                        const inst2 = self.bytecode.instructions.items[end_pc2];
+                        switch (inst2.opcode) {
+                            .AssertBackwardNegative => depth += 1,
+                            .AssertBackwardEnd => {
+                                depth -= 1;
+                                if (depth == 0) break;
+                            },
+                            else => {},
+                        }
+                    }
+                    var success = true;
+                    var try_pos: usize = 0;
+                    while (try_pos <= sub_pos) : (try_pos += 1) {
+                        const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, try_pos);
+                        if (sub_end) |se| {
+                            if (se == sub_pos) {
+                                success = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (success) {
+                        sub_pc = end_pc2 + 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertBackwardEnd => {
                     sub_pc += 1;
                 },
             }
@@ -280,7 +498,14 @@ pub const Vm = struct {
                     }
                 },
                 .CharClass => {
-                    if (pos < input.len and inst.char_class.?.*.contains(input[pos])) {
+                    const ch = if (pos < input.len) input[pos] else 0;
+                    const matches = if (self.options.case_sensitive)
+                        inst.char_class.?.*.contains(ch)
+                    else
+                        inst.char_class.?.*.contains(ch) or
+                        inst.char_class.?.*.contains(std.ascii.toLower(ch)) or
+                        inst.char_class.?.*.contains(std.ascii.toUpper(ch));
+                    if (pos < input.len and matches) {
                         pc += 1;
                         pos += 1;
                     } else {
@@ -354,7 +579,11 @@ pub const Vm = struct {
                     }
                     const group_text = input[group_start.?..group_end.?];
                     const remaining = input[pos..];
-                    if (remaining.len >= group_text.len and std.mem.startsWith(u8, remaining, group_text)) {
+                    const matches = if (self.options.case_sensitive)
+                        remaining.len >= group_text.len and std.mem.startsWith(u8, remaining, group_text)
+                    else
+                        remaining.len >= group_text.len and std.ascii.eqlIgnoreCase(remaining[0..group_text.len], group_text);
+                    if (matches) {
                         pc += 1;
                         pos += group_text.len;
                     } else {

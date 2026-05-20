@@ -28,7 +28,7 @@ pub const NodeType = enum {
 
 pub const AstNode = struct {
     type: NodeType,
-    value: ?u8, // 用于 Literal
+    value: ?usize, // 用于 Literal (char cast), Quantifier (min), Backref (group_idx)
     left: ?*AstNode, // 左子树
     right: ?*AstNode, // 右子树
     char_class: ?CharClass, // 用于 CharClass
@@ -191,6 +191,10 @@ pub const Parser = struct {
     // factor = primary quantifier?
     fn parseFactor(self: *Parser) ParserError!?*AstNode {
         const primary = try self.parsePrimary() orelse return null;
+        errdefer {
+            primary.deinit(self.allocator);
+            self.allocator.destroy(primary);
+        }
 
         const token = self.tokenizer.peek();
         switch (token.type) {
@@ -243,12 +247,23 @@ pub const Parser = struct {
     fn parseQuantifier(self: *Parser, primary: *AstNode) ParserError!?*AstNode {
         _ = self.tokenizer.nextToken(); // 消费 '{'
         
-        // 解析最小值
-        const min_token = self.tokenizer.nextToken();
-        if (min_token.type != .Literal or min_token.value.len == 0 or !std.ascii.isDigit(min_token.value[0])) {
-            return error.InvalidQuantifier;
+        // 解析最小值（支持多位数）
+        var min_buf: [64]u8 = undefined;
+        var min_len: usize = 0;
+        var t = self.tokenizer.nextToken();
+        while (t.type == .Literal and t.value.len == 1 and std.ascii.isDigit(t.value[0])) {
+            if (min_len >= min_buf.len) return error.InvalidQuantifier;
+            min_buf[min_len] = t.value[0];
+            min_len += 1;
+            const peek = self.tokenizer.peek();
+            if (peek.type == .Literal and peek.value.len == 1 and std.ascii.isDigit(peek.value[0])) {
+                t = self.tokenizer.nextToken();
+            } else {
+                break;
+            }
         }
-        const min = try std.fmt.parseInt(usize, min_token.value, 10);
+        if (min_len == 0) return error.InvalidQuantifier;
+        const min = try std.fmt.parseInt(usize, min_buf[0..min_len], 10);
         
         const next = self.tokenizer.peek();
         var max: ?usize = min;
@@ -260,22 +275,37 @@ pub const Parser = struct {
                 // {n,} - 至少 n 次
                 max = null;
             } else {
-                // {n,m} - n 到 m 次
-                const max_token = self.tokenizer.nextToken();
-                if (max_token.type != .Literal or max_token.value.len == 0 or !std.ascii.isDigit(max_token.value[0])) {
-                    return error.InvalidQuantifier;
+                // {n,m} - n 到 m 次（支持多位数）
+                var max_buf: [64]u8 = undefined;
+                var max_len: usize = 0;
+                var mt = self.tokenizer.nextToken();
+                while (mt.type == .Literal and mt.value.len == 1 and std.ascii.isDigit(mt.value[0])) {
+                    if (max_len >= max_buf.len) return error.InvalidQuantifier;
+                    max_buf[max_len] = mt.value[0];
+                    max_len += 1;
+                    const peek = self.tokenizer.peek();
+                    if (peek.type == .Literal and peek.value.len == 1 and std.ascii.isDigit(peek.value[0])) {
+                        mt = self.tokenizer.nextToken();
+                    } else {
+                        break;
+                    }
                 }
-                max = try std.fmt.parseInt(usize, max_token.value, 10);
+                if (max_len == 0) return error.InvalidQuantifier;
+                max = try std.fmt.parseInt(usize, max_buf[0..max_len], 10);
             }
         }
         
         _ = try self.tokenizer.expect(.RBrace);
-        
+
+        if (max) |m| {
+            if (min > m) return error.InvalidQuantifier;
+        }
+
         // 创建量词节点
         const node = try self.allocator.create(AstNode);
         node.* = .{
             .type = .Quantifier,
-            .value = @intCast(min),
+            .value = min,
             .left = primary,
             .right = null,
             .char_class = null,
@@ -309,7 +339,7 @@ pub const Parser = struct {
 
                 node.* = .{
                     .type = .Literal,
-                    .value = value,
+                    .value = @intCast(value),
                     .left = null,
                     .right = null,
                     .char_class = null,
@@ -395,7 +425,7 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
                     .type = .Backref,
-                    .value = @intCast(group_idx),
+                    .value = group_idx,
                     .left = null,
                     .right = null,
                     .char_class = null,
@@ -457,6 +487,56 @@ pub const Parser = struct {
             }
 
             _ = self.tokenizer.nextToken();
+
+            // 处理字符类内的 shorthand 转义序列 (\d, \w, \s, 等)
+            if (t.value.len == 2 and t.value[0] == '\\') {
+                const shorthand_handled = switch (t.value[1]) {
+                    'd' => blk: {
+                        try cc.addRange('0', '9');
+                        break :blk true;
+                    },
+                    'D' => blk: {
+                        try cc.addRange(0, '/' - 1);
+                        try cc.addRange(':' , 255);
+                        break :blk true;
+                    },
+                    'w' => blk: {
+                        try cc.addRange('a', 'z');
+                        try cc.addRange('A', 'Z');
+                        try cc.addRange('0', '9');
+                        try cc.addRange('_', '_');
+                        break :blk true;
+                    },
+                    'W' => blk: {
+                        try cc.addRange(0, '0' - 1);
+                        try cc.addRange('9' + 1, 'A' - 1);
+                        try cc.addRange('Z' + 1, '_' - 1);
+                        try cc.addRange('_' + 1, 'a' - 1);
+                        try cc.addRange('z' + 1, 255);
+                        break :blk true;
+                    },
+                    's' => blk: {
+                        try cc.addRange('\t', '\t');
+                        try cc.addRange(' ', ' ');
+                        try cc.addRange('\n', '\n');
+                        try cc.addRange('\r', '\r');
+                        break :blk true;
+                    },
+                    'S' => blk: {
+                        try cc.addRange(0, '\t' - 1);
+                        try cc.addRange('\t' + 1, '\n' - 1);
+                        try cc.addRange('\n' + 1, '\r' - 1);
+                        try cc.addRange('\r' + 1, ' ' - 1);
+                        try cc.addRange(' ' + 1, 255);
+                        break :blk true;
+                    },
+                    else => false,
+                };
+                if (shorthand_handled) {
+                    // shorthand 已处理，跳过范围检查
+                    continue;
+                }
+            }
 
             var start: u8 = undefined;
             if (t.value.len == 2 and t.value[0] == '\\') {

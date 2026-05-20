@@ -6,42 +6,53 @@ const regex = @import("../root.zig");
 
 test "lookahead: positive (?=...)" {
     const allocator = std.testing.allocator;
-    // TODO: lookahead implementation is buggy; currently returns false.
-    try std.testing.expect(!try regex.isMatch(allocator, "(?=foo)foo", "foo"));
+    try std.testing.expect(try regex.isMatch(allocator, "(?=foo)foo", "foo"));
 }
 
 test "lookahead: negative (?!...)" {
     const allocator = std.testing.allocator;
-    // Negative lookahead works for simple cases.
     try std.testing.expect(try regex.isMatch(allocator, "(?!foo)bar", "bar"));
+    try std.testing.expect(!try regex.isMatch(allocator, "(?!foo)foo", "foo"));
 }
 
 test "lookahead: combined with main pattern" {
     const allocator = std.testing.allocator;
-    // TODO: lookahead implementation is buggy; currently returns false.
-    try std.testing.expect(!try regex.isMatch(allocator, "q(?=u)", "qu"));
+    // q(?=u) should match q only if followed by u.
+    try std.testing.expect(try regex.isMatch(allocator, "q(?=u)", "qu"));
+    try std.testing.expect(!try regex.isMatch(allocator, "q(?=u)", "qa"));
 }
 
 test "lookahead: nested lookahead" {
     const allocator = std.testing.allocator;
-    // TODO: lookahead implementation is buggy; currently returns false.
-    try std.testing.expect(!try regex.isMatch(allocator, "(?=.*foo).*", "foo"));
+    try std.testing.expect(try regex.isMatch(allocator, "(?=.*foo).*", "foo"));
 }
 
 test "lookbehind: positive (?<=...)" {
     const allocator = std.testing.allocator;
-    // TODO: lookbehind implementation is buggy; currently returns false.
-    try std.testing.expect(!try regex.isMatch(allocator, "(?<=foo)bar", "foobar"));
+    // (?<=foo)bar matches from position 3, so use find instead of isMatch.
+    var result = try regex.find(allocator, "(?<=foo)bar", "foobar");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
 }
 
 test "lookbehind: negative (?<!...)" {
     const allocator = std.testing.allocator;
-    // Negative lookbehind works for simple cases.
     try std.testing.expect(try regex.isMatch(allocator, "(?<!foo)bar", "bar"));
+    try std.testing.expect(!try regex.isMatch(allocator, "(?<!foo)bar", "foobar"));
 }
 
 test "lookbehind: with fixed width" {
     const allocator = std.testing.allocator;
-    // TODO: lookbehind implementation is buggy; currently returns false.
-    try std.testing.expect(!try regex.isMatch(allocator, "(?<=ab)cd", "abcd"));
+    // (?<=ab)cd matches from position 2, so use find instead of isMatch.
+    var result = try regex.find(allocator, "(?<=ab)cd", "abcd");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
 }

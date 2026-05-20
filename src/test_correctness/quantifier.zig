@@ -76,3 +76,17 @@ test "quantifier: with alternation" {
     try std.testing.expect(try regex.isMatch(allocator, "(a|b)+", "ab"));
     try std.testing.expect(!try regex.isMatch(allocator, "(a|b)+", ""));
 }
+
+test "quantifier: invalid min > max" {
+    const allocator = std.testing.allocator;
+    // {3,2} should fail to compile.
+    const re = regex.compile(allocator, "a{3,2}") catch |err| switch (err) {
+        error.InvalidQuantifier => return,
+        else => {
+            try std.testing.expect(false);
+            return;
+        },
+    };
+    _ = re;
+    try std.testing.expect(false);
+}
