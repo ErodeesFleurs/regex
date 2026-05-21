@@ -18,6 +18,9 @@ pub const TokenType = enum {
     // 锚点
     Caret,         // ^
     Dollar,        // $
+    AssertStringStart,       // \A
+    AssertStringEnd,         // \z
+    AssertStringEndAllowNewline, // \Z
     
     // 转义序列
     Backslash,     // \
@@ -92,8 +95,43 @@ pub const Tokenizer = struct {
         // 处理转义序列
         if (ch == '\\' and self.position < self.input.len) {
             const next_ch = self.input[self.position];
+
+                // 十六进制转义: \xNN
+                if (next_ch == 'x') {
+                    if (self.position + 2 < self.input.len and
+                        std.ascii.isHex(self.input[self.position + 1]) and
+                        std.ascii.isHex(self.input[self.position + 2]))
+                {
+                    self.position += 3;
+                    return .{
+                        .type = .Literal,
+                        .value = self.input[start_pos..self.position],
+                        .position = start_pos,
+                    };
+                }
+                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+            }
+
+            // Unicode 转义: \uNNNN
+            if (next_ch == 'u') {
+                    if (self.position + 4 < self.input.len and
+                    std.ascii.isHex(self.input[self.position + 1]) and
+                    std.ascii.isHex(self.input[self.position + 2]) and
+                    std.ascii.isHex(self.input[self.position + 3]) and
+                    std.ascii.isHex(self.input[self.position + 4]))
+                {
+                    self.position += 5;
+                    return .{
+                        .type = .Literal,
+                        .value = self.input[start_pos..self.position],
+                        .position = start_pos,
+                    };
+                }
+                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+            }
+
             self.position += 1;
-            
+
             const token_type: TokenType = switch (next_ch) {
                 'd' => .Digit,
                 'D' => .NotDigit,
@@ -103,7 +141,9 @@ pub const Tokenizer = struct {
                 'S' => .NotWhitespace,
                 'b' => .WordBoundary,
                 'B' => .NotWordBoundary,
-                '0' => .Literal,
+                'A' => .AssertStringStart,
+                'z' => .AssertStringEnd,
+                'Z' => .AssertStringEndAllowNewline,
                 't' => .Literal,
                 'n' => .Literal,
                 'r' => .Literal,
@@ -112,7 +152,7 @@ pub const Tokenizer = struct {
                 '1'...'9' => .Backref,
                 else => .Invalid,
             };
-            
+
             return .{
                 .type = token_type,
                 .value = self.input[start_pos..self.position],

@@ -20,6 +20,9 @@ pub const OpCode = enum(u8) {
     // 零宽断言
     AssertStart,
     AssertEnd,
+    AssertStringStart,       // \A
+    AssertStringEnd,         // \z
+    AssertStringEndAllowNewline, // \Z
     AssertForward,
     AssertForwardEnd,
     AssertForwardNegative,
@@ -54,6 +57,9 @@ pub const Instruction = struct {
             .Save => try writer.print("Save({})", .{self.save_slot.?}),
             .AssertStart => try writer.print("AssertStart", .{}),
             .AssertEnd => try writer.print("AssertEnd", .{}),
+            .AssertStringStart => try writer.print("AssertStringStart", .{}),
+            .AssertStringEnd => try writer.print("AssertStringEnd", .{}),
+            .AssertStringEndAllowNewline => try writer.print("AssertStringEndAllowNewline", .{}),
             .AssertForward => try writer.print("AssertForward", .{}),
             .AssertForwardEnd => try writer.print("AssertForwardEnd", .{}),
             .AssertForwardNegative => try writer.print("AssertForwardNegative", .{}),

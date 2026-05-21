@@ -13,4 +13,7 @@ comptime {
     _ = @import("replace_split.zig");
     _ = @import("options.zig");
     _ = @import("stress.zig");
+    _ = @import("absolute_anchor.zig");
+    _ = @import("escapes.zig");
+    _ = @import("lazy.zig");
 }

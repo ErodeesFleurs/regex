@@ -184,6 +184,45 @@ pub const Vm = struct {
                         }
                     }
                 },
+                .AssertStringStart => {
+                    if (sub_pos == 0) {
+                        sub_pc += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertStringEnd => {
+                    if (sub_pos == input.len) {
+                        sub_pc += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertStringEndAllowNewline => {
+                    if (sub_pos == input.len or (sub_pos + 1 == input.len and input[sub_pos] == '\n')) {
+                        sub_pc += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
                 .Backref => {
                     const group_idx = inst.backref_group.?;
                     const start_slot = group_idx * 2;
@@ -665,6 +704,45 @@ pub const Vm = struct {
                     else
                         (pos == input.len);
                     if (at_end) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertStringStart => {
+                    if (pos == 0) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertStringEnd => {
+                    if (pos == input.len) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertStringEndAllowNewline => {
+                    if (pos == input.len or (pos + 1 == input.len and input[pos] == '\n')) {
                         pc += 1;
                     } else {
                         if (stack.items.len == 0) break;

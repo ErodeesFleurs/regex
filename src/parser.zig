@@ -11,11 +11,18 @@ pub const NodeType = enum {
     Plus, // 一次或多次 (a+)
     Question,      // 零次或一次 (a?)
     Quantifier,    // {n,m} 量词
+    LazyStar,      // 惰性零次或多次 (a*?)
+    LazyPlus,      // 惰性一次或多次 (a+?)
+    LazyQuestion,  // 惰性零次或一次 (a??)
+    LazyQuantifier, // 惰性 {n,m} 量词
     Group,         // 捕获组 ((...))
     Any,           // 任意字符 (.)
     CharClass,     // 字符类 ([...])
     AssertStart,   // 开始锚点 (^)
     AssertEnd,     // 结束锚点 ($)
+    AssertStringStart,       // \A
+    AssertStringEnd,         // \z
+    AssertStringEndAllowNewline, // \Z
     AssertForward,      // 正向前瞻 (?=...)
     AssertForwardNegative, // 负向前瞻 (?!...)
     AssertBackward,     // 正向后顾 (?<=...)
@@ -200,9 +207,11 @@ pub const Parser = struct {
         switch (token.type) {
             .Star => {
                 _ = self.tokenizer.nextToken();
+                const is_lazy = self.tokenizer.peek().type == .Question;
+                if (is_lazy) _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
-                    .type = .Star,
+                    .type = if (is_lazy) .LazyStar else .Star,
                     .value = null,
                     .left = primary,
                     .right = null,
@@ -213,9 +222,11 @@ pub const Parser = struct {
             },
             .Plus => {
                 _ = self.tokenizer.nextToken();
+                const is_lazy = self.tokenizer.peek().type == .Question;
+                if (is_lazy) _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
-                    .type = .Plus,
+                    .type = if (is_lazy) .LazyPlus else .Plus,
                     .value = null,
                     .left = primary,
                     .right = null,
@@ -226,9 +237,11 @@ pub const Parser = struct {
             },
             .Question => {
                 _ = self.tokenizer.nextToken();
+                const is_lazy = self.tokenizer.peek().type == .Question;
+                if (is_lazy) _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
-                    .type = .Question,
+                    .type = if (is_lazy) .LazyQuestion else .Question,
                     .value = null,
                     .left = primary,
                     .right = null,
@@ -238,7 +251,15 @@ pub const Parser = struct {
                 return node;
             },
             .LBrace => {
-                return try self.parseQuantifier(primary);
+                const qnode = try self.parseQuantifier(primary);
+                if (qnode) |qn| {
+                    const is_lazy = self.tokenizer.peek().type == .Question;
+                    if (is_lazy) {
+                        _ = self.tokenizer.nextToken();
+                        qn.type = .LazyQuantifier;
+                    }
+                }
+                return qnode;
             },
             else => return primary,
         }
@@ -324,13 +345,23 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
 
                 // 处理转义序列的值
-                var value: u8 = undefined;
-                if (token.value.len == 2 and token.value[0] == '\\') {
+                var value: usize = undefined;
+                if (token.value.len >= 2 and token.value[0] == '\\') {
                     value = switch (token.value[1]) {
                         't' => '\t',
                         'n' => '\n',
                         'r' => '\r',
                         '\\' => '\\',
+                        'x' => blk: {
+                            // \xNN - 两位十六进制
+                            const hex = token.value[2..];
+                            break :blk std.fmt.parseInt(u8, hex, 16) catch token.value[1];
+                        },
+                        'u' => blk: {
+                            // \uNNNN - 四位十六进制
+                            const hex = token.value[2..];
+                            break :blk std.fmt.parseInt(u16, hex, 16) catch token.value[1];
+                        },
                         else => token.value[1],
                     };
                 } else {
@@ -459,6 +490,45 @@ pub const Parser = struct {
                 };
                 return node;
             },
+            .AssertStringStart => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .AssertStringStart,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .AssertStringEnd => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .AssertStringEnd,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .AssertStringEndAllowNewline => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .AssertStringEndAllowNewline,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
             else => return null,
         }
     }
@@ -539,12 +609,14 @@ pub const Parser = struct {
             }
 
             var start: u8 = undefined;
-            if (t.value.len == 2 and t.value[0] == '\\') {
+            if (t.value.len >= 2 and t.value[0] == '\\') {
                 start = switch (t.value[1]) {
                     't' => '\t',
                     'n' => '\n',
                     'r' => '\r',
                     '\\' => '\\',
+                    'x' => std.fmt.parseInt(u8, t.value[2..], 16) catch t.value[1],
+                    'u' => @truncate(std.fmt.parseInt(u16, t.value[2..], 16) catch t.value[1]),
                     else => t.value[1],
                 };
             } else {
@@ -566,12 +638,14 @@ pub const Parser = struct {
 
                 _ = self.tokenizer.nextToken();
                 var end: u8 = undefined;
-                if (end_token.value.len == 2 and end_token.value[0] == '\\') {
+                if (end_token.value.len >= 2 and end_token.value[0] == '\\') {
                     end = switch (end_token.value[1]) {
                         't' => '\t',
                         'n' => '\n',
                         'r' => '\r',
                         '\\' => '\\',
+                        'x' => std.fmt.parseInt(u8, end_token.value[2..], 16) catch end_token.value[1],
+                        'u' => @truncate(std.fmt.parseInt(u16, end_token.value[2..], 16) catch end_token.value[1]),
                         else => end_token.value[1],
                     };
                 } else {

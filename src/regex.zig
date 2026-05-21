@@ -83,13 +83,34 @@ pub const Regex = struct {
         if (match_result.start > 0) {
             try result.appendSlice(self.allocator, text[0..match_result.start]);
         }
-        // 添加替换文本（支持 $0, $1, ... 和 $$）
+        // 添加替换文本（支持 $0, $1, ..., ${10}, ${name} 和 $$）
         var rep_i: usize = 0;
         while (rep_i < replacement.len) {
             if (replacement[rep_i] == '$' and rep_i + 1 < replacement.len) {
                 if (replacement[rep_i + 1] == '$') {
                     try result.append(self.allocator, '$');
                     rep_i += 2;
+                } else if (replacement[rep_i + 1] == '{') {
+                    // ${name} 或 ${10}
+                    var end_idx = rep_i + 2;
+                    while (end_idx < replacement.len and replacement[end_idx] != '}') {
+                        end_idx += 1;
+                    }
+                    if (end_idx < replacement.len and replacement[end_idx] == '}') {
+                        const ref_name = replacement[rep_i + 2 .. end_idx];
+                        if (std.fmt.parseInt(usize, ref_name, 10)) |group_idx| {
+                            if (match_result.getGroup(text, group_idx)) |group_text| {
+                                try result.appendSlice(self.allocator, group_text);
+                            }
+                        } else |_| {
+                            // 不是数字，作为字面量输出
+                            try result.appendSlice(self.allocator, replacement[rep_i .. end_idx + 1]);
+                        }
+                        rep_i = end_idx + 1;
+                    } else {
+                        try result.append(self.allocator, replacement[rep_i]);
+                        rep_i += 1;
+                    }
                 } else if (std.ascii.isDigit(replacement[rep_i + 1])) {
                     const group_idx = replacement[rep_i + 1] - '0';
                     if (match_result.getGroup(text, group_idx)) |group_text| {

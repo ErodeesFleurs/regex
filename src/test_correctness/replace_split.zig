@@ -76,6 +76,16 @@ test "replace: $$ escape" {
     try expectReplace(allocator, "a", "abc", "$$", "$bc");
 }
 
+test "replace: ${10} multi-digit group" {
+    const allocator = std.testing.allocator;
+    try expectReplace(allocator, "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)", "abcdefghij", "${10}", "j");
+}
+
+test "replace: mixed $1 and ${10}" {
+    const allocator = std.testing.allocator;
+    try expectReplace(allocator, "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)", "abcdefghij", "$1-${10}", "a-j");
+}
+
 test "split: simple delimiter" {
     const allocator = std.testing.allocator;
     try expectSplitLen(allocator, ",", "a,b,c", 3);

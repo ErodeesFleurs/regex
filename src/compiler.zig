@@ -86,52 +86,83 @@ pub const Compiler = struct {
                 self.bytecode.patch(jmp_idx, end_pos);
             },
             .Star => {
-                // L1: Split L2, L3
+                // 贪婪: L1: Split L2, L3
                 // L2: ...operand...
                 //      Jmp L1
-                // L3: 
-                
+                // L3:
                 const loop_start = self.bytecode.getPC();
-                const split_idx = try self.bytecode.emit(.{
+                _ = try self.bytecode.emit(.{
                     .opcode = .Split,
-                    .target = undefined, // 稍后填充为 L3
+                    .target = loop_start + 1,
                 });
-                
                 try self.compileNode(node.left.?);
-                
                 _ = try self.bytecode.emit(.{
                     .opcode = .Jmp,
                     .target = loop_start,
                 });
-                
-                const end_pos = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, end_pos);
             },
-            .Plus => {
-                // L1: ...operand...
-                //      Split L1, L2
-                // L2: 
-                
+            .LazyStar => {
+                // 惰性: L1: Split L3, L2
+                // L2: ...operand...
+                //      Jmp L1
+                // L3:
                 const loop_start = self.bytecode.getPC();
-                try self.compileNode(node.left.?);
-                
-                _ = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = loop_start,
-                });
-            },
-            .Question => {
-                //      Split L1, L2
-                // L1:  ...operand...
-                // L2: 
-                
                 const split_idx = try self.bytecode.emit(.{
                     .opcode = .Split,
                     .target = undefined,
                 });
-                
                 try self.compileNode(node.left.?);
-                
+                _ = try self.bytecode.emit(.{
+                    .opcode = .Jmp,
+                    .target = loop_start,
+                });
+                const end_pos = self.bytecode.getPC();
+                self.bytecode.patch(split_idx, end_pos);
+            },
+            .Plus => {
+                // 贪婪: L1: ...operand...
+                //      Split L1, L2
+                // L2:
+                try self.compileNode(node.left.?);
+                _ = try self.bytecode.emit(.{
+                    .opcode = .Split,
+                    .target = self.bytecode.getPC() - 1,
+                });
+            },
+            .LazyPlus => {
+                // 惰性: L1: ...operand...
+                //      Split L2, L1
+                // L2:
+                try self.compileNode(node.left.?);
+                const split_idx = try self.bytecode.emit(.{
+                    .opcode = .Split,
+                    .target = undefined,
+                });
+                const end_pos = self.bytecode.getPC();
+                self.bytecode.patch(split_idx, end_pos);
+            },
+            .Question => {
+                // 贪婪: Split L1, L2
+                // L1: ...operand...
+                // L2:
+                const split_idx = try self.bytecode.emit(.{
+                    .opcode = .Split,
+                    .target = undefined,
+                });
+                const operand_start = self.bytecode.getPC();
+                try self.compileNode(node.left.?);
+                _ = self.bytecode.getPC();
+                self.bytecode.patch(split_idx, operand_start);
+            },
+            .LazyQuestion => {
+                // 惰性: Split L2, L1
+                // L1: ...operand...
+                // L2:
+                const split_idx = try self.bytecode.emit(.{
+                    .opcode = .Split,
+                    .target = undefined,
+                });
+                try self.compileNode(node.left.?);
                 const end_pos = self.bytecode.getPC();
                 self.bytecode.patch(split_idx, end_pos);
             },
@@ -159,40 +190,10 @@ pub const Compiler = struct {
                 }
             },
             .Quantifier => {
-                const min = node.value.?;
-                const max = node.group_index; // 复用 group_index 字段存储 max
-                
-                // 生成 min 次必需的匹配
-                for (0..min) |_| {
-                    try self.compileNode(node.left.?);
-                }
-                
-                // 如果有最大值，生成额外的可选匹配
-                if (max) |m| {
-                    for (min..m) |_| {
-                        const split_idx = try self.bytecode.emit(.{
-                            .opcode = .Split,
-                            .target = undefined,
-                        });
-                        try self.compileNode(node.left.?);
-                        const end_pos = self.bytecode.getPC();
-                        self.bytecode.patch(split_idx, end_pos);
-                    }
-                } else {
-                    // {n,} - 无限重复
-                    const loop_start = self.bytecode.getPC();
-                    const split_idx = try self.bytecode.emit(.{
-                        .opcode = .Split,
-                        .target = undefined,
-                    });
-                    try self.compileNode(node.left.?);
-                    _ = try self.bytecode.emit(.{
-                        .opcode = .Jmp,
-                        .target = loop_start,
-                    });
-                    const end_pos = self.bytecode.getPC();
-                    self.bytecode.patch(split_idx, end_pos);
-                }
+                try self.compileQuantifier(node, false);
+            },
+            .LazyQuantifier => {
+                try self.compileQuantifier(node, true);
             },
             .Backref => {
                 _ = try self.bytecode.emit(.{
@@ -214,6 +215,15 @@ pub const Compiler = struct {
             },
             .AssertEnd => {
                 _ = try self.bytecode.emit(.{ .opcode = .AssertEnd });
+            },
+            .AssertStringStart => {
+                _ = try self.bytecode.emit(.{ .opcode = .AssertStringStart });
+            },
+            .AssertStringEnd => {
+                _ = try self.bytecode.emit(.{ .opcode = .AssertStringEnd });
+            },
+            .AssertStringEndAllowNewline => {
+                _ = try self.bytecode.emit(.{ .opcode = .AssertStringEndAllowNewline });
             },
             .AssertForward => {
                 // 正向前瞻: 编译内部表达式，但使用特殊标记
@@ -240,6 +250,57 @@ pub const Compiler = struct {
                 try self.compileNode(node.left.?);
                 _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
             },
+        }
+    }
+
+    fn compileQuantifier(self: *Compiler, node: *AstNode, lazy: bool) error{OutOfMemory}!void {
+        const min = node.value.?;
+        const max = node.group_index; // 复用 group_index 字段存储 max
+
+        // 生成 min 次必需的匹配
+        for (0..min) |_| {
+            try self.compileNode(node.left.?);
+        }
+
+        // 如果有最大值，生成额外的可选匹配
+        if (max) |m| {
+            for (min..m) |_| {
+                const split_idx = try self.bytecode.emit(.{
+                    .opcode = .Split,
+                    .target = undefined,
+                });
+                const operand_start = self.bytecode.getPC();
+                try self.compileNode(node.left.?);
+                const end_pos = self.bytecode.getPC();
+                if (lazy) {
+                    // 惰性: Split end_pos, operand_start
+                    self.bytecode.patch(split_idx, end_pos);
+                } else {
+                    // 贪婪: Split operand_start, end_pos
+                    self.bytecode.patch(split_idx, operand_start);
+                }
+            }
+        } else {
+            // {n,} - 无限重复
+            const loop_start = self.bytecode.getPC();
+            const split_idx = try self.bytecode.emit(.{
+                .opcode = .Split,
+                .target = undefined,
+            });
+            const operand_start = self.bytecode.getPC();
+            try self.compileNode(node.left.?);
+            _ = try self.bytecode.emit(.{
+                .opcode = .Jmp,
+                .target = loop_start,
+            });
+            const end_pos = self.bytecode.getPC();
+            if (lazy) {
+                // 惰性: Split end_pos, operand_start
+                self.bytecode.patch(split_idx, end_pos);
+            } else {
+                // 贪婪: Split operand_start, end_pos
+                self.bytecode.patch(split_idx, operand_start);
+            }
         }
     }
 };
