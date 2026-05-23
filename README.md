@@ -151,6 +151,29 @@ zig build
 zig build test
 ```
 
+## Benchmark
+
+```bash
+zig build bench
+```
+
+Example output:
+
+```
+=== Regex Benchmark ===
+                       Pattern |      Compile (us) |   isMatch (ns) |      find (ns)
+--------------------------------------------------------------------------------
+                 literal short | compile:       42 us | isMatch:  35767 ns | find:  35638 ns
+                   alternation | compile:       81 us | isMatch:  53753 ns | find:  56821 ns
+                          star | compile:       23 us | isMatch:  75423 ns | find:  72671 ns
+            quantifier {10,20} | compile:      124 us | isMatch:  55492 ns | find:  56324 ns
+      unicode property \p{Han} | compile:       40 us | isMatch:  57771 ns | find:  55647 ns
+      unicode case insensitive | compile:       26 us | isMatch:  14460 ns | find:  14306 ns
+           grapheme cluster \X | compile:       22 us | isMatch:  38365 ns | find:  37317 ns
+             lookahead (?=...) | compile:       44 us | isMatch:  34726 ns | find:  35576 ns
+               possessive a*+b | compile:       58 us | isMatch:  74515 ns | find:  73363 ns
+```
+
 ## CLI Usage
 
 ```bash
