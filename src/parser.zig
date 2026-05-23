@@ -2,47 +2,66 @@ const std = @import("std");
 const Token = @import("tokenizer.zig").Token;
 const TokenType = @import("tokenizer.zig").TokenType;
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
+const RegexOptions = @import("options.zig").RegexOptions;
 
 pub const NodeType = enum {
-    Literal, // 单个字符
-    Concat, // 连接 (ab)
-    Alternate, // 选择 (a|b)
-    Star, // 零次或多次 (a*)
-    Plus, // 一次或多次 (a+)
-    Question,      // 零次或一次 (a?)
-    Quantifier,    // {n,m} 量词
-    LazyStar,      // 惰性零次或多次 (a*?)
-    LazyPlus,      // 惰性一次或多次 (a+?)
-    LazyQuestion,  // 惰性零次或一次 (a??)
-    LazyQuantifier, // 惰性 {n,m} 量词
-    Group,         // 捕获组 ((...))
-    Any,           // 任意字符 (.)
-    CharClass,     // 字符类 ([...])
-    AssertStart,   // 开始锚点 (^)
-    AssertEnd,     // 结束锚点 ($)
+    Literal, // single character
+    Concat, // concatenation (ab)
+    Alternate, // alternation (a|b)
+    Star, // zero or more (a*)
+    Plus, // one or more (a+)
+    Question,      // zero or one (a?)
+    Quantifier,    // {n,m} quantifier
+    LazyStar,      // lazy zero or more (a*?)
+    LazyPlus,      // lazy one or more (a+?)
+    LazyQuestion,  // lazy zero or one (a??)
+    LazyQuantifier, // lazy {n,m} quantifier
+    PossessiveStar,     // possessive zero or more (a*+)
+    PossessivePlus,     // possessive one or more (a++)
+    PossessiveQuestion, // possessive zero or one (a?+)
+    PossessiveQuantifier, // possessive {n,m} quantifier
+    Group,         // capturing group ((...))
+    Any,           // any character (.)
+    CharClass,     // character class ([...])
+    AssertStart,   // start anchor (^)
+    AssertEnd,     // end anchor ($)
     AssertStringStart,       // \A
     AssertStringEnd,         // \z
     AssertStringEndAllowNewline, // \Z
-    AssertForward,      // 正向前瞻 (?=...)
-    AssertForwardNegative, // 负向前瞻 (?!...)
-    AssertBackward,     // 正向后顾 (?<=...)
-    AssertBackwardNegative, // 负向后顾 (?<!...)
-    Backref,       // 反向引用 \1, \2, ...
-    WordBoundary,     // 单词边界 \b
-    NotWordBoundary,  // 非单词边界 \B
-    Empty,         // 空表达式
+    AssertForward,      // positive lookahead (?=...)
+    AssertForwardNegative, // negative lookahead (?!...)
+    AssertBackward,     // positive lookbehind (?<=...)
+    AssertBackwardNegative, // negative lookbehind (?<!...)
+    InlineFlag,    // inline flag (?i:...)
+    AtomicGroup,   // atomic group (?>...)
+    Backref,       // backreference \1, \2, ...
+    WordBoundary,     // word boundary \b
+    NotWordBoundary,  // non-word boundary \B
+    UnicodeProperty,     // Unicode property \p{...}
+    NotUnicodeProperty,  // negated Unicode property \P{...}
+    Empty,         // empty expression
 };
 
 pub const AstNode = struct {
     type: NodeType,
-    value: ?usize, // 用于 Literal (char cast), Quantifier (min), Backref (group_idx)
-    left: ?*AstNode, // 左子树
-    right: ?*AstNode, // 右子树
-    char_class: ?CharClass, // 用于 CharClass
-    group_index: ?usize, // 用于 Group
-    char_class_transferred: bool = false, // char_class 是否已被转移到 bytecode
+    value: ?usize, // for Literal (char cast), Quantifier (min), Backref (group_idx)
+    left: ?*AstNode, // left subtree
+    right: ?*AstNode, // right subtree
+    char_class: ?CharClass, // for CharClass
+    group_index: ?usize, // for Group
+    group_name: ?[]const u8 = null, // for named capturing group
+    options: ?RegexOptions = null, // for InlineFlag
+    char_class_transferred: bool = false, // whether char_class has been transferred to bytecode
+    unicode_property: ?[]const u8 = null, // for UnicodeProperty
+    unicode_negated: bool = false, // for UnicodeProperty
 
     pub fn deinit(self: *AstNode, allocator: std.mem.Allocator) void {
+        if (self.group_name) |name| {
+            allocator.free(name);
+        }
+        if (self.unicode_property) |prop| {
+            allocator.free(prop);
+        }
         if (self.left) |left| {
             left.deinit(allocator);
             allocator.destroy(left);
@@ -96,25 +115,58 @@ pub const CharClass = struct {
     }
 };
 
+pub const ParseErrorInfo = struct {
+    message: []const u8,
+    position: usize,
+
+    pub fn format(self: ParseErrorInfo, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Parse error at position {d}: {s}", .{ self.position, self.message });
+    }
+};
+
 pub const Parser = struct {
     tokenizer: Tokenizer,
     allocator: std.mem.Allocator,
     group_counter: usize,
+    group_names: std.StringHashMap(usize),
+    last_error: ?ParseErrorInfo,
 
     pub fn init(allocator: std.mem.Allocator, input: []const u8) Parser {
         return .{
             .tokenizer = Tokenizer.init(input),
             .allocator = allocator,
             .group_counter = 0,
+            .group_names = std.StringHashMap(usize).init(allocator),
+            .last_error = null,
         };
+    }
+
+    pub fn deinit(self: *Parser) void {
+        self.group_names.deinit();
+    }
+
+    fn setError(self: *Parser, message: []const u8, position: usize) void {
+        self.last_error = ParseErrorInfo{
+            .message = message,
+            .position = position,
+        };
+    }
+
+    fn setErrorAtToken(self: *Parser, message: []const u8, token: Token) void {
+        self.setError(message, token.position);
     }
 
     pub fn parse(self: *Parser) !?*AstNode {
         var node = try self.parseExpression();
 
-        // 确保已经到达输入末尾
+        // Ensure we've reached the end of input
         const token = self.tokenizer.nextToken();
         if (token.type != .EOF) {
+            self.setErrorAtToken("Unexpected token after expression", token);
+            if (node) |n| {
+                n.deinit(self.allocator);
+                self.allocator.destroy(n);
+            }
             return error.UnexpectedToken;
         }
 
@@ -141,7 +193,7 @@ pub const Parser = struct {
             const token = self.tokenizer.peek();
             if (token.type != .Pipe) break;
 
-            _ = self.tokenizer.nextToken(); // 消费 '|'
+            _ = self.tokenizer.nextToken(); // consume '|'
 
             var right = try self.parseTerm();
             if (right == null) {
@@ -207,56 +259,59 @@ pub const Parser = struct {
         switch (token.type) {
             .Star => {
                 _ = self.tokenizer.nextToken();
-                const is_lazy = self.tokenizer.peek().type == .Question;
-                if (is_lazy) _ = self.tokenizer.nextToken();
+                const next = self.tokenizer.peek().type;
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = if (is_lazy) .LazyStar else .Star,
-                    .value = null,
-                    .left = primary,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
+                if (next == .Question) {
+                    _ = self.tokenizer.nextToken();
+                    node.* = .{ .type = .LazyStar, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                } else if (next == .Plus) {
+                    _ = self.tokenizer.nextToken();
+                    node.* = .{ .type = .PossessiveStar, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                } else {
+                    node.* = .{ .type = .Star, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                }
                 return node;
             },
             .Plus => {
                 _ = self.tokenizer.nextToken();
-                const is_lazy = self.tokenizer.peek().type == .Question;
-                if (is_lazy) _ = self.tokenizer.nextToken();
+                const next = self.tokenizer.peek().type;
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = if (is_lazy) .LazyPlus else .Plus,
-                    .value = null,
-                    .left = primary,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
+                if (next == .Question) {
+                    _ = self.tokenizer.nextToken();
+                    node.* = .{ .type = .LazyPlus, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                } else if (next == .Plus) {
+                    _ = self.tokenizer.nextToken();
+                    node.* = .{ .type = .PossessivePlus, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                } else {
+                    node.* = .{ .type = .Plus, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                }
                 return node;
             },
             .Question => {
                 _ = self.tokenizer.nextToken();
-                const is_lazy = self.tokenizer.peek().type == .Question;
-                if (is_lazy) _ = self.tokenizer.nextToken();
+                const next = self.tokenizer.peek().type;
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = if (is_lazy) .LazyQuestion else .Question,
-                    .value = null,
-                    .left = primary,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
+                if (next == .Question) {
+                    _ = self.tokenizer.nextToken();
+                    node.* = .{ .type = .LazyQuestion, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                } else if (next == .Plus) {
+                    _ = self.tokenizer.nextToken();
+                    node.* = .{ .type = .PossessiveQuestion, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                } else {
+                    node.* = .{ .type = .Question, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                }
                 return node;
             },
             .LBrace => {
                 const qnode = try self.parseQuantifier(primary);
                 if (qnode) |qn| {
-                    const is_lazy = self.tokenizer.peek().type == .Question;
-                    if (is_lazy) {
+                    const next = self.tokenizer.peek().type;
+                    if (next == .Question) {
                         _ = self.tokenizer.nextToken();
                         qn.type = .LazyQuantifier;
+                    } else if (next == .Plus) {
+                        _ = self.tokenizer.nextToken();
+                        qn.type = .PossessiveQuantifier;
                     }
                 }
                 return qnode;
@@ -266,14 +321,17 @@ pub const Parser = struct {
     }
     
     fn parseQuantifier(self: *Parser, primary: *AstNode) ParserError!?*AstNode {
-        _ = self.tokenizer.nextToken(); // 消费 '{'
+        _ = self.tokenizer.nextToken(); // consume '{'
         
-        // 解析最小值（支持多位数）
+        // Parse minimum value (supports multiple digits)
         var min_buf: [64]u8 = undefined;
         var min_len: usize = 0;
         var t = self.tokenizer.nextToken();
         while (t.type == .Literal and t.value.len == 1 and std.ascii.isDigit(t.value[0])) {
-            if (min_len >= min_buf.len) return error.InvalidQuantifier;
+            if (min_len >= min_buf.len) {
+                self.setErrorAtToken("Quantifier minimum value too long", t);
+                return error.InvalidQuantifier;
+            }
             min_buf[min_len] = t.value[0];
             min_len += 1;
             const peek = self.tokenizer.peek();
@@ -283,25 +341,31 @@ pub const Parser = struct {
                 break;
             }
         }
-        if (min_len == 0) return error.InvalidQuantifier;
+        if (min_len == 0) {
+            self.setErrorAtToken("Invalid quantifier: expected minimum value", t);
+            return error.InvalidQuantifier;
+        }
         const min = try std.fmt.parseInt(usize, min_buf[0..min_len], 10);
         
         const next = self.tokenizer.peek();
         var max: ?usize = min;
         
         if (next.type == .Literal and next.value.len == 1 and next.value[0] == ',') {
-            _ = self.tokenizer.nextToken(); // 消费 ','
+            _ = self.tokenizer.nextToken(); // consume ','
             const after_comma = self.tokenizer.peek();
             if (after_comma.type == .RBrace) {
-                // {n,} - 至少 n 次
+                // {n,} - at least n times
                 max = null;
             } else {
-                // {n,m} - n 到 m 次（支持多位数）
+                // {n,m} - n to m times (supports multiple digits)
                 var max_buf: [64]u8 = undefined;
                 var max_len: usize = 0;
                 var mt = self.tokenizer.nextToken();
                 while (mt.type == .Literal and mt.value.len == 1 and std.ascii.isDigit(mt.value[0])) {
-                    if (max_len >= max_buf.len) return error.InvalidQuantifier;
+                    if (max_len >= max_buf.len) {
+                        self.setErrorAtToken("Quantifier maximum value too long", mt);
+                        return error.InvalidQuantifier;
+                    }
                     max_buf[max_len] = mt.value[0];
                     max_len += 1;
                     const peek = self.tokenizer.peek();
@@ -311,18 +375,27 @@ pub const Parser = struct {
                         break;
                     }
                 }
-                if (max_len == 0) return error.InvalidQuantifier;
+                if (max_len == 0) {
+                    self.setErrorAtToken("Invalid quantifier: expected maximum value", mt);
+                    return error.InvalidQuantifier;
+                }
                 max = try std.fmt.parseInt(usize, max_buf[0..max_len], 10);
             }
         }
         
-        _ = try self.tokenizer.expect(.RBrace);
+        _ = self.tokenizer.expect(.RBrace) catch {
+            self.setErrorAtToken("Expected }", self.tokenizer.peek());
+            return error.UnexpectedToken;
+        };
 
         if (max) |m| {
-            if (min > m) return error.InvalidQuantifier;
+            if (min > m) {
+                self.setError("Invalid quantifier: minimum greater than maximum", self.tokenizer.peek().position);
+                return error.InvalidQuantifier;
+            }
         }
 
-        // 创建量词节点
+        // Create quantifier node
         const node = try self.allocator.create(AstNode);
         node.* = .{
             .type = .Quantifier,
@@ -344,28 +417,43 @@ pub const Parser = struct {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
 
-                // 处理转义序列的值
+                // Process escape sequence value
                 var value: usize = undefined;
                 if (token.value.len >= 2 and token.value[0] == '\\') {
                     value = switch (token.value[1]) {
                         't' => '\t',
                         'n' => '\n',
                         'r' => '\r',
+                        'a' => '\x07',
+                        'e' => '\x1B',
+                        'f' => '\x0C',
+                        'v' => '\x0B',
                         '\\' => '\\',
                         'x' => blk: {
-                            // \xNN - 两位十六进制
-                            const hex = token.value[2..];
-                            break :blk std.fmt.parseInt(u8, hex, 16) catch token.value[1];
+                            if (token.value.len >= 4 and token.value[2] == '{') {
+                                // \x{hhhh} - variable-length hex
+                                const hex = token.value[3 .. token.value.len - 1];
+                                break :blk std.fmt.parseInt(u21, hex, 16) catch token.value[1];
+                            } else {
+                                // \xNN - two-digit hex
+                                const hex = token.value[2..];
+                                break :blk std.fmt.parseInt(u8, hex, 16) catch token.value[1];
+                            }
                         },
                         'u' => blk: {
-                            // \uNNNN - 四位十六进制
+                            // \uNNNN - four-digit hex
                             const hex = token.value[2..];
                             break :blk std.fmt.parseInt(u16, hex, 16) catch token.value[1];
                         },
                         else => token.value[1],
                     };
                 } else {
-                    value = token.value[0];
+                    if (token.value.len == 1) {
+                        value = token.value[0];
+                    } else {
+                        // Multi-byte UTF-8 character
+                        value = std.unicode.utf8Decode(token.value) catch token.value[0];
+                    }
                 }
 
                 node.* = .{
@@ -444,6 +532,28 @@ pub const Parser = struct {
                 };
                 return node;
             },
+            .UnicodeProperty, .NotUnicodeProperty => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                // Extract property name: \p{prop} or \P{prop}
+                const prop_name = token.value[3..token.value.len - 1]; // skip \p{ and }
+                const prop_copy = try self.allocator.dupe(u8, prop_name);
+                node.* = .{
+                    .type = switch (token.type) {
+                        .UnicodeProperty => .UnicodeProperty,
+                        .NotUnicodeProperty => .NotUnicodeProperty,
+                        else => unreachable,
+                    },
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                    .unicode_property = prop_copy,
+                    .unicode_negated = token.type == .NotUnicodeProperty,
+                };
+                return node;
+            },
             .LParen => {
                 return try self.parseGroup();
             },
@@ -453,6 +563,34 @@ pub const Parser = struct {
             .Backref => {
                 _ = self.tokenizer.nextToken();
                 const group_idx = try std.fmt.parseInt(usize, token.value[1..], 10);
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .Backref,
+                    .value = group_idx,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .NamedBackref => {
+                _ = self.tokenizer.nextToken();
+                // token.value is like "\g<name>" or "\k<name>"
+                // Extract name between < and >
+                const name_start = std.mem.indexOf(u8, token.value, "<") orelse {
+                    self.setErrorAtToken("Invalid named backreference syntax", token);
+                    return error.InvalidBackref;
+                };
+                const name_end = std.mem.lastIndexOf(u8, token.value, ">") orelse {
+                    self.setErrorAtToken("Invalid named backreference syntax", token);
+                    return error.InvalidBackref;
+                };
+                const name = token.value[name_start + 1 .. name_end];
+                const group_idx = self.group_names.get(name) orelse {
+                    self.setErrorAtToken("Unknown named capture group", token);
+                    return error.InvalidBackref;
+                };
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
                     .type = .Backref,
@@ -534,7 +672,11 @@ pub const Parser = struct {
     }
 
     fn parseCharClass(self: *Parser) ParserError!?*AstNode {
-        _ = self.tokenizer.expect(.LBracket) catch return error.InvalidCharClass;
+        const lbracket_token = self.tokenizer.peek();
+        _ = self.tokenizer.expect(.LBracket) catch {
+            self.setErrorAtToken("Invalid character class", lbracket_token);
+            return error.InvalidCharClass;
+        };
 
         const token = self.tokenizer.peek();
         const negated = token.type == .Caret;
@@ -553,12 +695,13 @@ pub const Parser = struct {
             }
 
             if (t.type == .EOF) {
+                self.setErrorAtToken("Unterminated character class", t);
                 return error.UnterminatedCharClass;
             }
 
             _ = self.tokenizer.nextToken();
 
-            // 处理字符类内的 shorthand 转义序列 (\d, \w, \s, 等)
+            // Process shorthand escape sequences inside char class (\d, \w, \s, etc.)
             if (t.value.len == 2 and t.value[0] == '\\') {
                 const shorthand_handled = switch (t.value[1]) {
                     'd' => blk: {
@@ -603,7 +746,7 @@ pub const Parser = struct {
                     else => false,
                 };
                 if (shorthand_handled) {
-                    // shorthand 已处理，跳过范围检查
+                    // shorthand handled, skip range check
                     continue;
                 }
             }
@@ -611,10 +754,14 @@ pub const Parser = struct {
             var start: u8 = undefined;
             if (t.value.len >= 2 and t.value[0] == '\\') {
                 start = switch (t.value[1]) {
-                    't' => '\t',
-                    'n' => '\n',
-                    'r' => '\r',
-                    '\\' => '\\',
+                't' => '\t',
+                        'n' => '\n',
+                        'r' => '\r',
+                        'a' => '\x07',
+                        'e' => '\x1B',
+                        'f' => '\x0C',
+                        'v' => '\x0B',
+                        '\\' => '\\',
                     'x' => std.fmt.parseInt(u8, t.value[2..], 16) catch t.value[1],
                     'u' => @truncate(std.fmt.parseInt(u16, t.value[2..], 16) catch t.value[1]),
                     else => t.value[1],
@@ -623,14 +770,14 @@ pub const Parser = struct {
                 start = t.value[0];
             }
 
-            // 检查是否是范围 (a-z)
+            // Check if it's a range (a-z)
             const next = self.tokenizer.peek();
             if (next.type == .Literal and next.value.len == 1 and next.value[0] == '-') {
-                _ = self.tokenizer.nextToken(); // 消费 '-'
+                _ = self.tokenizer.nextToken(); // consume '-'
 
                 const end_token = self.tokenizer.peek();
                 if (end_token.type == .EOF or end_token.type == .RBracket) {
-                    // '-' 在末尾，作为字面量
+                    // '-' at the end, treat as literal
                     try cc.addRange(start, start);
                     try cc.addRange('-', '-');
                     continue;
@@ -671,22 +818,26 @@ pub const Parser = struct {
     }
 
     fn parseGroup(self: *Parser) ParserError!?*AstNode {
-        _ = self.tokenizer.nextToken(); // 消费 '('
+        _ = self.tokenizer.nextToken(); // consume '('
         
         const next_token = self.tokenizer.peek();
         
         if (next_token.type == .Question) {
-            _ = self.tokenizer.nextToken(); // 消费 '?'
+            _ = self.tokenizer.nextToken(); // consume '?'
             const special = self.tokenizer.nextToken();
             
             if (special.type == .Literal and special.value.len == 1) {
                 switch (special.value[0]) {
                     ':' => {
-                        // 非捕获组 (?:...)
-                        const inner = try self.parseExpression() orelse {
-                            return error.EmptyGroup;
+                        // Non-capturing group (?:...)
+            const inner = try self.parseExpression() orelse {
+                self.setErrorAtToken("Empty group", self.tokenizer.peek());
+                return error.EmptyGroup;
+            };
+                        _ = self.tokenizer.expect(.RParen) catch {
+                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                            return error.UnexpectedToken;
                         };
-                        _ = try self.tokenizer.expect(.RParen);
                         
                         const node = try self.allocator.create(AstNode);
                         node.* = .{
@@ -700,12 +851,16 @@ pub const Parser = struct {
                         return node;
                     },
                     '=' => {
-                        // 正向前瞻 (?=...)
+                        // Positive lookahead (?=...)
                         const inner = try self.parseExpression() orelse {
+                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
                             return error.EmptyGroup;
                         };
-                        _ = try self.tokenizer.expect(.RParen);
-                        
+                        _ = self.tokenizer.expect(.RParen) catch {
+                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                            return error.UnexpectedToken;
+                        };
+
                         const node = try self.allocator.create(AstNode);
                         node.* = .{
                             .type = .AssertForward,
@@ -718,11 +873,15 @@ pub const Parser = struct {
                         return node;
                     },
                     '!' => {
-                        // 负向前瞻 (?!...)
+                        // Negative lookahead (?!...)
                         const inner = try self.parseExpression() orelse {
+                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
                             return error.EmptyGroup;
                         };
-                        _ = try self.tokenizer.expect(.RParen);
+                        _ = self.tokenizer.expect(.RParen) catch {
+                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                            return error.UnexpectedToken;
+                        };
                         
                         const node = try self.allocator.create(AstNode);
                         node.* = .{
@@ -736,16 +895,20 @@ pub const Parser = struct {
                         return node;
                     },
                     '<' => {
-                        // 检查是后顾断言 (?<=...), (?<!...) 还是命名捕获组 (?<name>...)
+                        // Check if lookbehind (?<=...), (?<!...) or named capture group (?<name>...)
                         const next = self.tokenizer.peek();
                         if (next.type == .Literal and next.value.len == 1) {
                             if (next.value[0] == '=') {
-                                // 正向后顾 (?<=...)
-                                _ = self.tokenizer.nextToken(); // 消费 '='
+                                // Positive lookbehind (?<=...)
+                                _ = self.tokenizer.nextToken(); // consume '='
                                 const inner = try self.parseExpression() orelse {
+                                    self.setErrorAtToken("Empty group", self.tokenizer.peek());
                                     return error.EmptyGroup;
                                 };
-                                _ = try self.tokenizer.expect(.RParen);
+                                _ = self.tokenizer.expect(.RParen) catch {
+                                    self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                                    return error.UnexpectedToken;
+                                };
                                 
                                 const node = try self.allocator.create(AstNode);
                                 node.* = .{
@@ -758,12 +921,16 @@ pub const Parser = struct {
                                 };
                                 return node;
                             } else if (next.value[0] == '!') {
-                                // 负向后顾 (?<!...)
-                                _ = self.tokenizer.nextToken(); // 消费 '!'
+                                // Negative lookbehind (?<!...)
+                                _ = self.tokenizer.nextToken(); // consume '!'
                                 const inner = try self.parseExpression() orelse {
+                                    self.setErrorAtToken("Empty group", self.tokenizer.peek());
                                     return error.EmptyGroup;
                                 };
-                                _ = try self.tokenizer.expect(.RParen);
+                                _ = self.tokenizer.expect(.RParen) catch {
+                                    self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                                    return error.UnexpectedToken;
+                                };
                                 
                                 const node = try self.allocator.create(AstNode);
                                 node.* = .{
@@ -778,70 +945,101 @@ pub const Parser = struct {
                             }
                         }
                         
-                        // 命名捕获组 (?<name>...)
-                        // 解析名称
-                        var name_buf: [64]u8 = undefined;
-                        var name_len: usize = 0;
-                        
-                        while (true) {
-                            const ch_token = self.tokenizer.peek();
-                            if (ch_token.type == .Literal and ch_token.value.len == 1) {
-                                const ch = ch_token.value[0];
-                                if (ch == '>') {
-                                    _ = self.tokenizer.nextToken(); // 消费 '>'
-                                    break;
-                                }
-                                if (name_len < name_buf.len) {
-                                    name_buf[name_len] = ch;
-                                    name_len += 1;
-                                    _ = self.tokenizer.nextToken();
-                                } else {
-                                    return error.UnexpectedToken;
-                                }
-                            } else {
-                                return error.UnexpectedToken;
-                            }
+                        // Named capture group (?<name>...)
+                        return try self.parseNamedGroup();
+                    },
+                    'P' => {
+                        // Python-style named capture group (?P<name>...)
+                        const next = self.tokenizer.peek();
+                        if (next.type == .Literal and next.value.len == 1 and next.value[0] == '<') {
+                            _ = self.tokenizer.nextToken(); // consume '<'
+                            return try self.parseNamedGroup();
                         }
-                        
-                        const name = try self.allocator.dupe(u8, name_buf[0..name_len]);
-                        defer self.allocator.free(name);
-                        
-                        self.group_counter += 1;
-                        const group_index = self.group_counter;
-                        
+                        self.setErrorAtToken("Unexpected token", next);
+                        return error.UnexpectedToken;
+                    },
+                    'i', 'm', 's' => {
+                        // Inline flag (?i:...), (?m:...), (?s:...)
+                        var opts = RegexOptions{};
+                        switch (special.value[0]) {
+                            'i' => opts.case_sensitive = false,
+                            'm' => opts.multiline = true,
+                            's' => opts.dot_matches_newline = true,
+                            else => unreachable,
+                        }
+                        // expect ':'
+                        const colon = self.tokenizer.peek();
+                        if (colon.type == .Literal and colon.value.len == 1 and colon.value[0] == ':') {
+                            _ = self.tokenizer.nextToken(); // consume ':'
+                        } else {
+                            self.setErrorAtToken("Unexpected token: expected ':'", colon);
+                            return error.UnexpectedToken;
+                        }
                         const inner = try self.parseExpression() orelse {
+                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
                             return error.EmptyGroup;
                         };
-                        
-                        _ = try self.tokenizer.expect(.RParen);
-                        
+                        _ = self.tokenizer.expect(.RParen) catch {
+                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                            return error.UnexpectedToken;
+                        };
                         const node = try self.allocator.create(AstNode);
                         node.* = .{
-                            .type = .Group,
+                            .type = .InlineFlag,
                             .value = null,
                             .left = inner,
                             .right = null,
                             .char_class = null,
-                            .group_index = group_index,
+                            .group_index = null,
+                            .options = opts,
                         };
-                        
                         return node;
                     },
-                    else => return error.UnexpectedToken,
+                    '>' => {
+                        // Atomic group (?>...)
+                        const inner = try self.parseExpression() orelse {
+                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
+                            return error.EmptyGroup;
+                        };
+                        _ = self.tokenizer.expect(.RParen) catch {
+                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                            return error.UnexpectedToken;
+                        };
+                        const node = try self.allocator.create(AstNode);
+                        node.* = .{
+                            .type = .AtomicGroup,
+                            .value = null,
+                            .left = inner,
+                            .right = null,
+                            .char_class = null,
+                            .group_index = null,
+                        };
+                        return node;
+                    },
+                    else => {
+                        self.setErrorAtToken("Unexpected token in group", special);
+                        return error.UnexpectedToken;
+                    },
                 }
             } else {
                 return error.UnexpectedToken;
             }
         } else {
-            // 普通捕获组
+            // Ordinary capturing group
             self.group_counter += 1;
             const group_index = self.group_counter;
             
             const inner = try self.parseExpression() orelse {
+                self.setErrorAtToken("Empty group", self.tokenizer.peek());
                 return error.EmptyGroup;
             };
             
-            _ = try self.tokenizer.expect(.RParen);
+            _ = self.tokenizer.expect(.RParen) catch {
+                self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                inner.deinit(self.allocator);
+                self.allocator.destroy(inner);
+                return error.UnexpectedToken;
+            };
             
             const node = try self.allocator.create(AstNode);
             node.* = .{
@@ -855,6 +1053,64 @@ pub const Parser = struct {
             return node;
         }
     }
+
+    fn parseNamedGroup(self: *Parser) ParserError!?*AstNode {
+        // Parse name (?<name>... or (?P<name>...)
+        var name_buf: [64]u8 = undefined;
+        var name_len: usize = 0;
+
+        while (true) {
+            const ch_token = self.tokenizer.peek();
+            if (ch_token.type == .Literal and ch_token.value.len == 1) {
+                const ch = ch_token.value[0];
+                if (ch == '>') {
+                    _ = self.tokenizer.nextToken(); // consume '>'
+                    break;
+                }
+                if (name_len < name_buf.len) {
+                    name_buf[name_len] = ch;
+                    name_len += 1;
+                    _ = self.tokenizer.nextToken();
+                } else {
+                    self.setErrorAtToken("Group name too long", ch_token);
+                    return error.UnexpectedToken;
+                }
+            } else {
+                self.setErrorAtToken("Unexpected token in group name", ch_token);
+                return error.UnexpectedToken;
+            }
+        }
+
+        const name = try self.allocator.dupe(u8, name_buf[0..name_len]);
+
+        self.group_counter += 1;
+        const group_index = self.group_counter;
+
+        try self.group_names.put(name, group_index);
+
+        const inner = try self.parseExpression() orelse {
+            self.setErrorAtToken("Empty group", self.tokenizer.peek());
+            return error.EmptyGroup;
+        };
+
+        _ = self.tokenizer.expect(.RParen) catch {
+            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+            return error.UnexpectedToken;
+        };
+
+        const node = try self.allocator.create(AstNode);
+        node.* = .{
+            .type = .Group,
+            .value = null,
+            .left = inner,
+            .right = null,
+            .char_class = null,
+            .group_index = group_index,
+            .group_name = name,
+        };
+
+        return node;
+    }
 };
 
 pub const ParserError = error{
@@ -865,6 +1121,7 @@ pub const ParserError = error{
     UnterminatedCharClass,
     InvalidQuantifier,
     InvalidCharacter,
+    InvalidBackref,
     Overflow,
     OutOfMemory,
 };

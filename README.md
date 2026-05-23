@@ -7,11 +7,15 @@ A regular expression engine written in Zig.
 - **Core matching**: literals, concatenation, alternation (`|`)
 - **Quantifiers**: `*`, `+`, `?`, `{n,m}`
 - **Character classes**: `[a-z]`, `\d`, `\w`, `\s`, `\D`, `\W`, `\S`
-- **Anchors**: `^` (start), `$` (end)
-- **Groups**: capturing `(...)`, non-capturing `(?:...)`, named `(?<name>...)`
+- **Escape sequences**: `\t`, `\n`, `\r`, `\a` (bell), `\e` (escape), `\f` (form feed), `\v` (vertical tab), `\xNN`, `\x{hhhh}`, `\uNNNN`
+- **Unicode properties**: `\p{L}`, `\p{Lu}`, `\p{Ll}`, `\p{N}`, `\p{Nd}`, `\p{P}`, `\p{S}`, `\p{Z}`, `\P{...}`
+- **Unicode scripts**: `\p{Han}`, `\p{Latin}`, `\p{Greek}`, `\p{Cyrillic}`, `\p{Arabic}`, `\p{Hebrew}`, `\p{Armenian}`, `\p{Georgian}`, `\p{Thai}`, `\p{Devanagari}`, `\p{Hiragana}`, `\p{Katakana}`, `\p{Hangul}`
+- **Anchors**: `^` (start), `$` (end), `\A`, `\z`, `\Z`
+- **Groups**: capturing `(...)`, non-capturing `(?:...)`, named `(?<name>...)`, atomic `(?>...)`, backrefs `\1`, `\g<name>`, `\k<name>`
+- **Quantifiers**: greedy `*+`, `++`, `?+`, `{n,m}+` (possessive)
 - **Assertions**: lookahead `(?=...)`, `(?!...)`, lookbehind `(?<=...)`, `(?<!...)`
-- **Text operations**: `replace`, `split`, `find`, `findAll`
-- **Options**: case sensitivity, multiline mode (framework ready)
+- **Text operations**: `replace`, `replaceAll`, `split`, `find`, `findAll`
+- **Options**: case sensitivity (ASCII + Unicode), multiline mode, dot-matches-newline, max execution steps (backtracking protection)
 
 ## Usage
 
@@ -57,6 +61,11 @@ defer re.deinit();
 var parts = try re.split("a,b,c");
 defer parts.deinit(allocator);
 // parts == ["a", "b", "c"]
+
+// Split with a limit
+var parts2 = try re.splitLimit("a,b,c,d", 2);
+defer parts2.deinit(allocator);
+// parts2 == ["a", "b", "c,d"]
 ```
 
 ### With Options
@@ -66,6 +75,48 @@ var re = try regex.compileWithOptions(allocator, "hello", .{
     .case_sensitive = false,
 });
 defer re.deinit();
+```
+
+### Backtracking Protection
+
+The engine has built-in protection against catastrophic backtracking. A default limit of 1,000,000 execution steps prevents pathological patterns like `(a+)+b` from hanging on malicious input:
+
+```zig
+var re = try regex.compile(allocator, "(a+)+b"); // uses default limit
+defer re.deinit();
+// Returns false quickly instead of hanging on long strings of 'a'
+try std.testing.expect(!try re.isMatch("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+```
+
+Customize or disable the limit:
+
+```zig
+// Stricter limit
+var re = try regex.compileWithOptions(allocator, "(a+)+b", .{ .max_steps = 10000 });
+
+// Unlimited (not recommended for untrusted input)
+var re = try regex.compileWithOptions(allocator, "(a+)+b", .{ .max_steps = null });
+```
+
+### Named Backreferences
+
+Reference a named capture group by name with `\g<name>` or `\k<name>`:
+
+```zig
+var re = try regex.compile(allocator, "(?<word>\\w+) \\g<word>");
+defer re.deinit();
+try std.testing.expect(try re.isMatch("hello hello"));
+try std.testing.expect(!try re.isMatch("hello world"));
+```
+
+Case-insensitive matching supports Unicode simple case folding for Latin, Greek, Cyrillic, Armenian, Georgian, and Fullwidth Latin scripts:
+
+```zig
+var re = try regex.compileWithOptions(allocator, "café", .{ .case_sensitive = false });
+defer re.deinit();
+try std.testing.expect(try re.isMatch("CAFÉ")); // Unicode case folding
+
+try std.testing.expect(try regex.isMatch(allocator, "αβγ", "ΑΒΓ")); // Greek
 ```
 
 ## Building
@@ -83,12 +134,23 @@ zig build test
 ## CLI Usage
 
 ```bash
-zig build run -- "pattern" "text"
+zig build run -- [options] <pattern> <text>
 ```
 
-Example:
+Options:
+- `-a, --find-all` — Find all matches
+- `-r, --replace <repl>` — Replace matches with <repl>
+- `-i, --case-insensitive` — Case insensitive matching
+- `-m, --multiline` — Multiline mode
+- `-s, --dot-matches-newline` — Dot matches newline
+- `-d, --debug` — Dump bytecode instructions
+
+Examples:
 ```bash
 zig build run -- "\d+" "abc123def"
+zig build run -- -a "\d+" "abc123def456"
+zig build run -- -i "hello" "HELLO"
+zig build run -- -r "[$&]" "\d+" "abc123def"
 ```
 
 ## Architecture

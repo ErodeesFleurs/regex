@@ -113,3 +113,47 @@ test "split: empty string" {
     const allocator = std.testing.allocator;
     try expectSplitLen(allocator, ",", "", 1);
 }
+
+test "split: limit 1" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, ",");
+    defer re.deinit();
+    var parts = try re.splitLimit("a,b,c", 1);
+    defer parts.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), parts.items.len);
+    try std.testing.expectEqualStrings("a", parts.items[0]);
+    try std.testing.expectEqualStrings("b,c", parts.items[1]);
+}
+
+test "split: limit 2" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, ",");
+    defer re.deinit();
+    var parts = try re.splitLimit("a,b,c,d", 2);
+    defer parts.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), parts.items.len);
+    try std.testing.expectEqualStrings("a", parts.items[0]);
+    try std.testing.expectEqualStrings("b", parts.items[1]);
+    try std.testing.expectEqualStrings("c,d", parts.items[2]);
+}
+
+test "split: limit zero" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, ",");
+    defer re.deinit();
+    var parts = try re.splitLimit("a,b,c", 0);
+    defer parts.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), parts.items.len);
+    try std.testing.expectEqualStrings("a,b,c", parts.items[0]);
+}
+
+test "split: limit greater than matches" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, ",");
+    defer re.deinit();
+    var parts = try re.splitLimit("a,b", 10);
+    defer parts.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), parts.items.len);
+    try std.testing.expectEqualStrings("a", parts.items[0]);
+    try std.testing.expectEqualStrings("b", parts.items[1]);
+}

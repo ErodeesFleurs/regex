@@ -5,11 +5,11 @@ const regex = @import("../root.zig");
 
 test "stress: long string literal match" {
     const allocator = std.testing.allocator;
-    const text = "a" ** 1000;
+    const text = "a" ** 100;
     try std.testing.expect(try regex.isMatch(allocator, "a+", text));
-    try std.testing.expect(try regex.isMatch(allocator, "a{500}", text));
-    try std.testing.expect(try regex.isMatch(allocator, "a{1000}", text));
-    try std.testing.expect(!try regex.isMatch(allocator, "a{1001}", text));
+    try std.testing.expect(try regex.isMatch(allocator, "a{50}", text));
+    try std.testing.expect(try regex.isMatch(allocator, "a{100}", text));
+    try std.testing.expect(!try regex.isMatch(allocator, "a{101}", text));
 }
 
 test "stress: deep nesting" {

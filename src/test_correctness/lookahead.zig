@@ -56,3 +56,43 @@ test "lookbehind: with fixed width" {
         try std.testing.expect(false);
     }
 }
+
+test "lookbehind: variable width" {
+    const allocator = std.testing.allocator;
+    // (?<=a+)b should match b preceded by one or more a's.
+    var result = try regex.find(allocator, "(?<=a+)b", "aaab");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+    
+    var result2 = try regex.find(allocator, "(?<=a+)b", "ab");
+    if (result2) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "lookbehind: alternation" {
+    const allocator = std.testing.allocator;
+    // (?<=foo|bar)baz
+    var result = try regex.find(allocator, "(?<=foo|bar)baz", "foobaz");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+    
+    var result2 = try regex.find(allocator, "(?<=foo|bar)baz", "barbaz");
+    if (result2) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+}

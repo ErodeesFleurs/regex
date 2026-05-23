@@ -28,3 +28,36 @@ test "escape: hex in char class" {
     try std.testing.expect(try regex.isMatch(allocator, "[\\x41-\\x43]", "B"));
     try std.testing.expect(!try regex.isMatch(allocator, "[\\x41-\\x43]", "D"));
 }
+
+test "escape: \\x{hhhh} variable hex" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\x{41}", "A"));
+    try std.testing.expect(try regex.isMatch(allocator, "\\x{1F600}", "\u{1F600}"));
+    try std.testing.expect(!try regex.isMatch(allocator, "\\x{41}", "B"));
+}
+
+test "escape: \\x{hhhh} emoji" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\x{2764}", "\u{2764}"));
+    try std.testing.expect(try regex.isMatch(allocator, "\\x{1F525}", "\u{1F525}"));
+}
+
+test "escape: \\a bell" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\a", "\x07"));
+}
+
+test "escape: \\e escape" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\e", "\x1B"));
+}
+
+test "escape: \\f form feed" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\f", "\x0C"));
+}
+
+test "escape: \\v vertical tab" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\v", "\x0B"));
+}

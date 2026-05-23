@@ -2,22 +2,23 @@ const std = @import("std");
 const AstNode = @import("parser.zig").AstNode;
 const NodeType = @import("parser.zig").NodeType;
 const CharClass = @import("parser.zig").CharClass;
+const RegexOptions = @import("options.zig").RegexOptions;
 
 pub const OpCode = enum(u8) {
-    // 基础指令
-    Char,          // 匹配单个字符
-    Any,           // 匹配任意字符
-    CharClass,     // 匹配字符类
+    // Basic instructions
+    Char,          // match single character
+    Any,           // match any character
+    CharClass,     // match character class
     
-    // 控制流
-    Split,         // 分裂执行 (NFA)
-    Jmp,           // 跳转
-    Match,         // 匹配成功
+    // Control flow
+    Split,         // split execution (NFA)
+    Jmp,           // jump
+    Match,         // match success
     
-    // 分组
-    Save,          // 保存捕获组位置
+    // Grouping
+    Save,          // save capture group position
     
-    // 零宽断言
+    // Zero-width assertions
     AssertStart,
     AssertEnd,
     AssertStringStart,       // \A
@@ -30,21 +31,38 @@ pub const OpCode = enum(u8) {
     AssertBackwardEnd,
     AssertBackwardNegative,
 
-    // 反向引用
+    // Backreferences
     Backref,
 
-    // 单词边界
+    // Word boundaries
     WordBoundary,
     NotWordBoundary,
+
+    // Inline flags
+    SetOption,
+
+    // Atomic groups
+    AtomicStart,
+    AtomicEnd,
+    
+    // Unicode properties
+    UnicodeProperty,
+    
+    // Unicode character (for case-insensitive matching of non-ASCII literals)
+    CharUtf8,
 };
 
 pub const Instruction = struct {
     opcode: OpCode,
     char: ?u8 = null,
+    char_codepoint: ?u21 = null, // for CharUtf8 instruction
     char_class: ?*CharClass = null,
     target: ?usize = null,
     save_slot: ?usize = null,
     backref_group: ?usize = null,
+    options: ?RegexOptions = null,
+    unicode_property: ?[]const u8 = null,
+    unicode_negated: bool = false,
     
     pub fn format(self: Instruction, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.opcode) {
@@ -69,6 +87,13 @@ pub const Instruction = struct {
             .Backref => try writer.print("Backref({})", .{self.backref_group.?}),
             .WordBoundary => try writer.print("WordBoundary", .{}),
             .NotWordBoundary => try writer.print("NotWordBoundary", .{}),
+            .SetOption => try writer.print("SetOption", .{}),
+            .AtomicStart => try writer.print("AtomicStart", .{}),
+            .AtomicEnd => try writer.print("AtomicEnd", .{}),
+            .UnicodeProperty => try writer.print("UnicodeProperty({s}{s})", .{
+                if (self.unicode_negated) "P{" else "p{",
+                self.unicode_property.?, 
+            }),
         }
     }
 };
@@ -76,19 +101,30 @@ pub const Instruction = struct {
 pub const Bytecode = struct {
     instructions: std.ArrayList(Instruction),
     num_groups: usize,
-    
+    unicode_properties: std.ArrayList([]const u8),
+    first_char: ?u8 = null, // first literal character, used for fast skipping in find()
+
     allocator: std.mem.Allocator,
-    
+    is_static: bool = false, // true for comptime-compiled bytecode; skips deallocation
+
     pub fn init(allocator: std.mem.Allocator) Bytecode {
         return .{
             .instructions = .empty,
             .num_groups = 0,
+            .unicode_properties = .empty,
+            .first_char = null,
             .allocator = allocator,
         };
     }
-    
+
     pub fn deinit(self: *Bytecode) void {
-        self.instructions.deinit(self.allocator);
+        if (!self.is_static) {
+            for (self.unicode_properties.items) |prop| {
+                self.allocator.free(prop);
+            }
+            self.unicode_properties.deinit(self.allocator);
+            self.instructions.deinit(self.allocator);
+        }
     }
     
     pub fn emit(self: *Bytecode, inst: Instruction) !usize {

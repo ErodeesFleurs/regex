@@ -16,4 +16,10 @@ comptime {
     _ = @import("absolute_anchor.zig");
     _ = @import("escapes.zig");
     _ = @import("lazy.zig");
+    _ = @import("atomic.zig");
+    _ = @import("named_possessive.zig");
+    _ = @import("findall_replaceall.zig");
+    _ = @import("unicode_property.zig");
+    _ = @import("backtracking.zig");
+    _ = @import("boundary.zig");
 }

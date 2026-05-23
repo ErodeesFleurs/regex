@@ -39,15 +39,17 @@ pub fn find(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8)
 
 test "root basic usage" {
     const allocator = std.testing.allocator;
-    
+
     // 测试便捷函数
     try std.testing.expect(try isMatch(allocator, "hello", "hello"));
     try std.testing.expect(!try isMatch(allocator, "hello", "world"));
-    
+
     // 测试 Regex 对象
     var regex = try compile(allocator, "a+");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("a"));
     try std.testing.expect(try regex.isMatch("aaa"));
 }
+
+

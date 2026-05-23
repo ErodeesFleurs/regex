@@ -1,31 +1,31 @@
 const std = @import("std");
 
 pub const TokenType = enum {
-    // 字面量字符
+    // Literal character
     Literal,
     
-    // 元字符
+    // Metacharacters
     Dot,           // .
     Star,          // *
     Plus,          // +
     Question,      // ?
     Pipe,          // |
     
-    // 分组
+    // Grouping
     LParen,        // (
     RParen,        // )
     
-    // 锚点
+    // Anchors
     Caret,         // ^
     Dollar,        // $
     AssertStringStart,       // \A
     AssertStringEnd,         // \z
     AssertStringEndAllowNewline, // \Z
     
-    // 转义序列
+    // Escape sequences
     Backslash,     // \
     
-    // 特殊字符类
+    // Special character classes
     Digit,         // \d
     NotDigit,      // \D
     Word,          // \w
@@ -33,23 +33,28 @@ pub const TokenType = enum {
     Whitespace,    // \s
     NotWhitespace, // \S
     
-    // 单词边界
+    // Word boundaries
     WordBoundary,     // \b
     NotWordBoundary,  // \B
     
-    // 反向引用
+    // Backreferences
     Backref,       // \1, \2, ...
+    NamedBackref,  // \g<name>, \k<name>
     
-    // 量词
+    // Unicode properties
+    UnicodeProperty,     // \p{...}
+    NotUnicodeProperty,  // \P{...}
+    
+    // Quantifiers
     LBrace,        // {
     RBrace,        // }
     Comma,         // ,
     
-    // 字符类
+    // Character classes
     LBracket,      // [
     RBracket,      // ]
     
-    // 其他
+    // Other
     EOF,
     Invalid,
 };
@@ -92,27 +97,43 @@ pub const Tokenizer = struct {
         const ch = self.input[self.position];
         self.position += 1;
         
-        // 处理转义序列
+        // Process escape sequences
         if (ch == '\\' and self.position < self.input.len) {
             const next_ch = self.input[self.position];
 
-                // 十六进制转义: \xNN
+                // Hex escape: \xNN or \x{hhhh}
                 if (next_ch == 'x') {
+                    if (self.position + 1 < self.input.len and self.input[self.position + 1] == '{') {
+                        // \x{hhhh} format
+                        var hex_end = self.position + 2;
+                        while (hex_end < self.input.len and std.ascii.isHex(self.input[hex_end])) {
+                            hex_end += 1;
+                        }
+                        if (hex_end < self.input.len and self.input[hex_end] == '}' and hex_end > self.position + 2) {
+                            self.position = hex_end + 1;
+                            return .{
+                                .type = .Literal,
+                                .value = self.input[start_pos..self.position],
+                                .position = start_pos,
+                            };
+                        }
+                        return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                    }
                     if (self.position + 2 < self.input.len and
                         std.ascii.isHex(self.input[self.position + 1]) and
                         std.ascii.isHex(self.input[self.position + 2]))
-                {
-                    self.position += 3;
-                    return .{
-                        .type = .Literal,
-                        .value = self.input[start_pos..self.position],
-                        .position = start_pos,
-                    };
+                    {
+                        self.position += 3;
+                        return .{
+                            .type = .Literal,
+                            .value = self.input[start_pos..self.position],
+                            .position = start_pos,
+                        };
+                    }
+                    return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
                 }
-                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
-            }
 
-            // Unicode 转义: \uNNNN
+            // Unicode escape: \uNNNN
             if (next_ch == 'u') {
                     if (self.position + 4 < self.input.len and
                     std.ascii.isHex(self.input[self.position + 1]) and
@@ -132,6 +153,44 @@ pub const Tokenizer = struct {
 
             self.position += 1;
 
+            // Unicode property: \p{...} or \P{...}
+            if (next_ch == 'p' or next_ch == 'P') {
+                if (self.position < self.input.len and self.input[self.position] == '{') {
+                    const prop_start = self.position + 1;
+                    var prop_end = prop_start;
+                    while (prop_end < self.input.len and self.input[prop_end] != '}') {
+                        prop_end += 1;
+                    }
+                    if (prop_end < self.input.len and self.input[prop_end] == '}') {
+                        self.position = prop_end + 1;
+                        return .{
+                            .type = if (next_ch == 'p') .UnicodeProperty else .NotUnicodeProperty,
+                            .value = self.input[start_pos..self.position],
+                            .position = start_pos,
+                        };
+                    }
+                }
+            }
+
+            // Named backreference: \g<name> or \k<name>
+            if (next_ch == 'g' or next_ch == 'k') {
+                if (self.position < self.input.len and self.input[self.position] == '<') {
+                    const name_start = self.position + 1;
+                    var name_end = name_start;
+                    while (name_end < self.input.len and self.input[name_end] != '>') {
+                        name_end += 1;
+                    }
+                    if (name_end < self.input.len and self.input[name_end] == '>' and name_end > name_start) {
+                        self.position = name_end + 1;
+                        return .{
+                            .type = .NamedBackref,
+                            .value = self.input[start_pos..self.position],
+                            .position = start_pos,
+                        };
+                    }
+                }
+            }
+
             const token_type: TokenType = switch (next_ch) {
                 'd' => .Digit,
                 'D' => .NotDigit,
@@ -147,6 +206,10 @@ pub const Tokenizer = struct {
                 't' => .Literal,
                 'n' => .Literal,
                 'r' => .Literal,
+                'a' => .Literal,
+                'e' => .Literal,
+                'f' => .Literal,
+                'v' => .Literal,
                 '\\' => .Literal,
                 '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => .Literal,
                 '1'...'9' => .Backref,
@@ -173,12 +236,23 @@ pub const Tokenizer = struct {
             '\\' => .Backslash,
             '{' => .LBrace,
             '}' => .RBrace,
-            // ',' 在正则表达式中是字面量（仅在量词 {n,m} 中有特殊含义）
+            // ',' is a literal in regex (only has special meaning in quantifier {n,m})
             '[' => .LBracket,
             ']' => .RBracket,
             else => .Literal,
         };
-        
+
+        // For multi-byte UTF-8 literal characters, advance to the end of the character
+        if (token_type == .Literal and ch >= 128) {
+            if (std.unicode.utf8ByteSequenceLength(ch)) |len| {
+                if (start_pos + len <= self.input.len) {
+                    self.position = start_pos + len;
+                }
+            } else |_| {
+                // Invalid UTF-8, keep as single byte
+            }
+        }
+
         return .{
             .type = token_type,
             .value = self.input[start_pos..self.position],
@@ -202,7 +276,7 @@ pub const Tokenizer = struct {
     }
 };
 
-// 错误类型
+// Error types
 pub const TokenizerError = error{
     UnexpectedToken,
     InvalidEscapeSequence,
