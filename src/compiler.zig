@@ -312,9 +312,12 @@ pub const Compiler = struct {
                 try self.bytecode.unicode_properties.append(self.allocator, prop_copy);
                 _ = try self.bytecode.emit(.{
                     .opcode = .UnicodeProperty,
-                    .unicode_property = prop_copy, 
+                    .unicode_property = prop_copy,
                     .unicode_negated = true,
                 });
+            },
+            .GraphemeCluster => {
+                _ = try self.bytecode.emit(.{ .opcode = .GraphemeCluster });
             },
             .Empty => {
                 // Empty expression generates no instructions

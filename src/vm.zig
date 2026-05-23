@@ -1699,6 +1699,35 @@ fn matchUnicodeProperty(input: []const u8, pos: usize, property: []const u8, neg
     }
 }
 
+/// Match a single grapheme cluster (simplified implementation).
+/// Returns the total byte length of the cluster, or null if no cluster at pos.
+fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
+    if (pos >= input.len) return null;
+
+    // CR LF sequence is a single grapheme cluster
+    if (input[pos] == '\r' and pos + 1 < input.len and input[pos + 1] == '\n') {
+        return 2;
+    }
+
+    // Get first codepoint byte length
+    const first_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch return 1;
+    if (pos + first_len > input.len) return 1;
+
+    _ = std.unicode.utf8Decode(input[pos..pos + first_len]) catch return 1;
+    var total_len: usize = first_len;
+
+    // Consume subsequent combining marks (General Category M)
+    while (pos + total_len < input.len) {
+        const next_len = std.unicode.utf8ByteSequenceLength(input[pos + total_len]) catch break;
+        if (pos + total_len + next_len > input.len) break;
+        const next_cp = std.unicode.utf8Decode(input[pos + total_len..pos + total_len + next_len]) catch break;
+        if (!isUnicodeProperty(next_cp, "M")) break;
+        total_len += next_len;
+    }
+
+    return total_len;
+}
+
 pub const Vm = struct {
     bytecode: Bytecode,
     allocator: std.mem.Allocator,
@@ -1859,6 +1888,20 @@ pub const Vm = struct {
                 },
                 .UnicodeProperty => {
                     if (matchUnicodeProperty(input, sub_pos, inst.unicode_property.?, inst.unicode_negated)) |byte_len| {
+                        sub_pc += 1;
+                        sub_pos += byte_len;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .GraphemeCluster => {
+                    if (matchGraphemeCluster(input, sub_pos)) |byte_len| {
                         sub_pc += 1;
                         sub_pos += byte_len;
                     } else {
@@ -2433,6 +2476,21 @@ pub const Vm = struct {
                 },
                 .UnicodeProperty => {
                     if (matchUnicodeProperty(input, pos, inst.unicode_property.?, inst.unicode_negated)) |byte_len| {
+                        pc += 1;
+                        pos += byte_len;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        self.options = frame.options;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .GraphemeCluster => {
+                    if (matchGraphemeCluster(input, pos)) |byte_len| {
                         pc += 1;
                         pos += byte_len;
                     } else {

@@ -39,6 +39,7 @@ pub const NodeType = enum {
     NotWordBoundary,  // non-word boundary \B
     UnicodeProperty,     // Unicode property \p{...}
     NotUnicodeProperty,  // negated Unicode property \P{...}
+    GraphemeCluster,     // grapheme cluster \X
     Empty,         // empty expression
 };
 
@@ -595,6 +596,19 @@ pub const Parser = struct {
                 node.* = .{
                     .type = .Backref,
                     .value = group_idx,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .GraphemeCluster => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .GraphemeCluster,
+                    .value = null,
                     .left = null,
                     .right = null,
                     .char_class = null,

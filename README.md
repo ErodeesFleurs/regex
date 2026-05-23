@@ -10,6 +10,7 @@ A regular expression engine written in Zig.
 - **Escape sequences**: `\t`, `\n`, `\r`, `\a` (bell), `\e` (escape), `\f` (form feed), `\v` (vertical tab), `\xNN`, `\x{hhhh}`, `\uNNNN`
 - **Unicode properties**: `\p{L}`, `\p{Lu}`, `\p{Ll}`, `\p{N}`, `\p{Nd}`, `\p{P}`, `\p{S}`, `\p{Z}`, `\P{...}`
 - **Unicode scripts**: `\p{Han}`, `\p{Latin}`, `\p{Greek}`, `\p{Cyrillic}`, `\p{Arabic}`, `\p{Hebrew}`, `\p{Armenian}`, `\p{Georgian}`, `\p{Thai}`, `\p{Devanagari}`, `\p{Hiragana}`, `\p{Katakana}`, `\p{Hangul}`
+- **Grapheme clusters**: `\X` matches a single user-perceived character (including combining marks)
 - **Anchors**: `^` (start), `$` (end), `\A`, `\z`, `\Z`
 - **Groups**: capturing `(...)`, non-capturing `(?:...)`, named `(?<name>...)`, atomic `(?>...)`, backrefs `\1`, `\g<name>`, `\k<name>`
 - **Quantifiers**: greedy `*+`, `++`, `?+`, `{n,m}+` (possessive)
@@ -117,6 +118,25 @@ defer re.deinit();
 try std.testing.expect(try re.isMatch("CAFÉ")); // Unicode case folding
 
 try std.testing.expect(try regex.isMatch(allocator, "αβγ", "ΑΒΓ")); // Greek
+```
+
+### Grapheme Clusters
+
+`\X` matches a single user-perceived character, including sequences with combining marks:
+
+```zig
+var re = try regex.compile(allocator, "\\X");
+defer re.deinit();
+
+// Matches single characters
+try std.testing.expect(try re.isMatch("a"));
+try std.testing.expect(try re.isMatch("中"));
+
+// Matches e + combining acute accent as one cluster
+try std.testing.expect(try re.isMatch("e\u{0301}"));
+
+// CR LF is treated as a single cluster
+try std.testing.expect(try re.isMatch("\r\n"));
 ```
 
 ## Building

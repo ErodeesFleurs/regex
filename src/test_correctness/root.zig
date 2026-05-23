@@ -22,4 +22,5 @@ comptime {
     _ = @import("unicode_property.zig");
     _ = @import("backtracking.zig");
     _ = @import("boundary.zig");
+    _ = @import("grapheme_cluster.zig");
 }

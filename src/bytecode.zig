@@ -47,9 +47,12 @@ pub const OpCode = enum(u8) {
     
     // Unicode properties
     UnicodeProperty,
-    
+
     // Unicode character (for case-insensitive matching of non-ASCII literals)
     CharUtf8,
+
+    // Grapheme cluster
+    GraphemeCluster,
 };
 
 pub const Instruction = struct {

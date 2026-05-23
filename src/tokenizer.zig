@@ -54,6 +54,9 @@ pub const TokenType = enum {
     LBracket,      // [
     RBracket,      // ]
     
+    // Grapheme cluster
+    GraphemeCluster,  // \X
+    
     // Other
     EOF,
     Invalid,
@@ -189,6 +192,15 @@ pub const Tokenizer = struct {
                         };
                     }
                 }
+            }
+
+            // Grapheme cluster: \X
+            if (next_ch == 'X') {
+                return .{
+                    .type = .GraphemeCluster,
+                    .value = self.input[start_pos..self.position],
+                    .position = start_pos,
+                };
             }
 
             const token_type: TokenType = switch (next_ch) {
