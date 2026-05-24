@@ -41,6 +41,8 @@ const Frame = struct {
     pos: usize,
     capture_slot: ?usize,
     capture_old_value: ?usize,
+    paired_capture_slot: ?usize = null,
+    paired_capture_old_value: ?usize = null,
     options: RegexOptions,
 };
 
@@ -1960,13 +1962,20 @@ pub const Vm = struct {
                     const slot = inst.save_slot.?;
                     const old_val = sub_captures.items[slot];
                     sub_captures.items[slot] = sub_pos;
-                    try sub_stack.append(self.allocator, .{
+                    var frame = Frame{
                         .pc = sub_pc + 1,
                         .pos = sub_pos,
                         .capture_slot = slot,
                         .capture_old_value = old_val,
                         .options = self.options,
-                    });
+                    };
+                    // If this is an end slot, also save the paired start slot
+                    if (slot % 2 == 1) {
+                        const start_slot = slot - 1;
+                        frame.paired_capture_slot = start_slot;
+                        frame.paired_capture_old_value = sub_captures.items[start_slot];
+                    }
+                    try sub_stack.append(self.allocator, frame);
                     sub_pc += 1;
                 },
                 .Match => {
@@ -2065,6 +2074,22 @@ pub const Vm = struct {
                         }
                     }
                     sub_pc += 1;
+                },
+                .Conditional => {
+                    const group_idx = inst.backref_group.?;
+                    const start_slot = group_idx * 2;
+                    const end_slot = group_idx * 2 + 1;
+                    var condition_met = false;
+                    if (start_slot < sub_captures.items.len and end_slot < sub_captures.items.len) {
+                        const group_start = sub_captures.items[start_slot];
+                        const group_end = sub_captures.items[end_slot];
+                        condition_met = group_start != null and group_end != null;
+                    }
+                    if (condition_met) {
+                        sub_pc += 1;
+                    } else {
+                        sub_pc = inst.target.?;
+                    }
                 },
                 .Backref => {
                     const group_idx = inst.backref_group.?;
@@ -2560,13 +2585,20 @@ pub const Vm = struct {
                     const old_val = captures.items[slot];
                     captures.items[slot] = pos;
 
-                    try stack.append(self.allocator, .{
+                    var frame = Frame{
                         .pc = pc + 1,
                         .pos = pos,
                         .capture_slot = slot,
                         .capture_old_value = old_val,
                         .options = self.options,
-                    });
+                    };
+                    // If this is an end slot, also save the paired start slot
+                    if (slot % 2 == 1) {
+                        const start_slot = slot - 1;
+                        frame.paired_capture_slot = start_slot;
+                        frame.paired_capture_old_value = captures.items[start_slot];
+                    }
+                    try stack.append(self.allocator, frame);
                     pc += 1;
                 },
                 .Match => {
@@ -2592,6 +2624,22 @@ pub const Vm = struct {
                         }
                     }
                     pc += 1;
+                },
+                .Conditional => {
+                    const group_idx = inst.backref_group.?;
+                    const start_slot = group_idx * 2;
+                    const end_slot = group_idx * 2 + 1;
+                    var condition_met = false;
+                    if (start_slot < captures.items.len and end_slot < captures.items.len) {
+                        const group_start = captures.items[start_slot];
+                        const group_end = captures.items[end_slot];
+                        condition_met = group_start != null and group_end != null;
+                    }
+                    if (condition_met) {
+                        pc += 1;
+                    } else {
+                        pc = inst.target.?;
+                    }
                 },
                 .Backref => {
                     const group_idx = inst.backref_group.?;

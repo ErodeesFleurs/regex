@@ -53,6 +53,9 @@ pub const OpCode = enum(u8) {
 
     // Grapheme cluster
     GraphemeCluster,
+
+    // Conditional (?(n)yes|no)
+    Conditional,
 };
 
 pub const Instruction = struct {
@@ -97,6 +100,7 @@ pub const Instruction = struct {
                 if (self.unicode_negated) "P{" else "p{",
                 self.unicode_property.?, 
             }),
+            .Conditional => try writer.print("Conditional({}) -> {}", .{self.backref_group.?, self.target.?}),
         }
     }
 };

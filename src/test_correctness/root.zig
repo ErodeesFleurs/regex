@@ -23,4 +23,5 @@ comptime {
     _ = @import("backtracking.zig");
     _ = @import("boundary.zig");
     _ = @import("grapheme_cluster.zig");
+    _ = @import("conditional.zig");
 }

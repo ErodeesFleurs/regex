@@ -40,6 +40,7 @@ pub const NodeType = enum {
     UnicodeProperty,     // Unicode property \p{...}
     NotUnicodeProperty,  // negated Unicode property \P{...}
     GraphemeCluster,     // grapheme cluster \X
+    Conditional,   // conditional (?(n)yes|no)
     Empty,         // empty expression
 };
 
@@ -968,8 +969,75 @@ pub const Parser = struct {
         
         if (next_token.type == .Question) {
             _ = self.tokenizer.nextToken(); // consume '?'
-            const special = self.tokenizer.nextToken();
-            
+            const special = self.tokenizer.peek();
+
+            // Conditional: (?(...)...)
+            if (special.type == .LParen) {
+                _ = self.tokenizer.nextToken(); // consume '('
+                const cond_token = self.tokenizer.nextToken();
+                var group_idx: usize = 0;
+                var has_condition = false;
+
+                if (cond_token.type == .Literal and cond_token.value.len >= 1) {
+                    // Try to parse as number
+                    if (std.fmt.parseInt(usize, cond_token.value, 10)) |n| {
+                        group_idx = n;
+                        has_condition = true;
+                    } else |_| {
+                        // Could be named group: (?(<name>)...)
+                        // For now, only support numeric
+                        self.setErrorAtToken("Expected capture group number", cond_token);
+                        return error.UnexpectedToken;
+                    }
+                } else if (cond_token.type == .Backref and cond_token.value.len >= 2) {
+                    // Backref token like \1
+                    if (std.fmt.parseInt(usize, cond_token.value[1..], 10)) |n| {
+                        group_idx = n;
+                        has_condition = true;
+                    } else |_| {
+                        self.setErrorAtToken("Expected capture group number", cond_token);
+                        return error.UnexpectedToken;
+                    }
+                }
+
+                _ = self.tokenizer.expect(.RParen) catch {
+                    self.setErrorAtToken("Unclosed condition", self.tokenizer.peek());
+                    return error.UnexpectedToken;
+                };
+
+                const yes_branch = try self.parseExpression() orelse {
+                    self.setErrorAtToken("Empty conditional branch", self.tokenizer.peek());
+                    return error.EmptyGroup;
+                };
+
+                var no_branch: ?*AstNode = null;
+                const after_yes = self.tokenizer.peek();
+                if (after_yes.type == .Pipe) {
+                    _ = self.tokenizer.nextToken(); // consume '|'
+                    no_branch = try self.parseExpression() orelse {
+                        self.setErrorAtToken("Empty conditional branch", self.tokenizer.peek());
+                        return error.EmptyGroup;
+                    };
+                }
+
+                _ = self.tokenizer.expect(.RParen) catch {
+                    self.setErrorAtToken("Unclosed conditional group", self.tokenizer.peek());
+                    return error.UnexpectedToken;
+                };
+
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .Conditional,
+                    .value = group_idx,
+                    .left = yes_branch,
+                    .right = no_branch,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            }
+
+            _ = self.tokenizer.nextToken(); // consume special
             if (special.type == .Literal and special.value.len == 1) {
                 switch (special.value[0]) {
                     ':' => {

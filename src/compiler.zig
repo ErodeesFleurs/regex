@@ -374,6 +374,52 @@ pub const Compiler = struct {
                 try self.compileNode(node.left.?);
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
             },
+            .Conditional => {
+                // (?(n)yes|no)
+                const group_idx = node.value.?;
+                const cond_idx = try self.bytecode.emit(.{
+                    .opcode = .Conditional,
+                    .backref_group = group_idx,
+                    .target = undefined,
+                });
+
+                const yes_node = node.left.?;
+                const no_node = node.right;
+
+                // If left is Alternate, use its children as yes/no branches
+                if (yes_node.type == .Alternate and no_node == null) {
+                    try self.compileNode(yes_node.left.?);
+                    const jmp_idx = try self.bytecode.emit(.{
+                        .opcode = .Jmp,
+                        .target = undefined,
+                    });
+                    const no_start = self.bytecode.getPC();
+                    try self.compileNode(yes_node.right.?);
+                    const end_pos = self.bytecode.getPC();
+                    self.bytecode.patch(cond_idx, no_start);
+                    self.bytecode.patch(jmp_idx, end_pos);
+                } else {
+                    // Compile yes branch
+                    try self.compileNode(yes_node);
+
+                    if (no_node) |no| {
+                        // There is a no branch: yes branch needs to jump over it
+                        const jmp_idx = try self.bytecode.emit(.{
+                            .opcode = .Jmp,
+                            .target = undefined,
+                        });
+                        const no_start = self.bytecode.getPC();
+                        try self.compileNode(no);
+                        const end_pos = self.bytecode.getPC();
+                        self.bytecode.patch(cond_idx, no_start);
+                        self.bytecode.patch(jmp_idx, end_pos);
+                    } else {
+                        // No no-branch: if condition fails, jump past yes branch
+                        const end_pos = self.bytecode.getPC();
+                        self.bytecode.patch(cond_idx, end_pos);
+                    }
+                }
+            },
         }
     }
 
