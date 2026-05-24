@@ -1949,7 +1949,11 @@ pub const Vm = struct {
                     break;
                 },
                 .AssertStart => {
-                    if (sub_pos == 0) {
+                    const at_start = if (self.options.multiline)
+                        (sub_pos == 0 or input[sub_pos - 1] == '\n')
+                    else
+                        (sub_pos == 0);
+                    if (at_start) {
                         sub_pc += 1;
                     } else {
                         if (sub_stack.items.len == 0) break;
@@ -1962,7 +1966,11 @@ pub const Vm = struct {
                     }
                 },
                 .AssertEnd => {
-                    if (sub_pos == input.len) {
+                    const at_end = if (self.options.multiline)
+                        (sub_pos == input.len or input[sub_pos] == '\n')
+                    else
+                        (sub_pos == input.len);
+                    if (at_end) {
                         sub_pc += 1;
                     } else {
                         if (sub_stack.items.len == 0) break;

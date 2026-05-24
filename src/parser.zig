@@ -509,6 +509,15 @@ pub const Parser = struct {
                             const hex = token.value[2..];
                             break :blk std.fmt.parseInt(u16, hex, 16) catch token.value[1];
                         },
+                        'c' => blk: {
+                            // \cX - control character
+                            if (token.value.len >= 3) {
+                                const ctrl_ch = token.value[2];
+                                break :blk ctrl_ch & 0x1F;
+                            }
+                            break :blk 0;
+                        },
+                        '0' => 0,
                         else => token.value[1],
                     };
                 } else {

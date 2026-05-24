@@ -631,3 +631,32 @@ test "regex literal quote empty" {
     try std.testing.expect(try regex.isMatch("ab"));
     try std.testing.expect(!try regex.isMatch("a+b"));
 }
+
+test "regex control character \\cX" {
+    const allocator = std.testing.allocator;
+
+    // \cA = 0x01 (SOH)
+    var regex = try Regex.compile(allocator, "\\cA");
+    defer regex.deinit();
+    try std.testing.expect(try regex.isMatch("\x01"));
+    try std.testing.expect(!try regex.isMatch("A"));
+
+    // \cZ = 0x1A (SUB)
+    var regex2 = try Regex.compile(allocator, "\\cZ");
+    defer regex2.deinit();
+    try std.testing.expect(try regex2.isMatch("\x1A"));
+
+    // \c[ = 0x1B (ESC)
+    var regex3 = try Regex.compile(allocator, "\\c[");
+    defer regex3.deinit();
+    try std.testing.expect(try regex3.isMatch("\x1B"));
+}
+
+test "regex null character \\0" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "\\0");
+    defer regex.deinit();
+    try std.testing.expect(try regex.isMatch("\x00"));
+    try std.testing.expect(!try regex.isMatch("0"));
+}

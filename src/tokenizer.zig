@@ -177,6 +177,25 @@ pub const Tokenizer = struct {
 
             self.position += 1;
 
+            // Control character: \cX where X is any character
+            if (next_ch == 'c' and self.position < self.input.len) {
+                self.position += 1; // consume control character
+                return .{
+                    .type = .Literal,
+                    .value = self.input[start_pos..self.position],
+                    .position = start_pos,
+                };
+            }
+
+            // Null character: \0
+            if (next_ch == '0') {
+                return .{
+                    .type = .Literal,
+                    .value = self.input[start_pos..self.position],
+                    .position = start_pos,
+                };
+            }
+
             // Unicode property: \p{...} or \P{...}
             if (next_ch == 'p' or next_ch == 'P') {
                 if (self.position < self.input.len and self.input[self.position] == '{') {
@@ -242,13 +261,7 @@ pub const Tokenizer = struct {
                 'A' => .AssertStringStart,
                 'z' => .AssertStringEnd,
                 'Z' => .AssertStringEndAllowNewline,
-                't' => .Literal,
-                'n' => .Literal,
-                'r' => .Literal,
-                'a' => .Literal,
-                'e' => .Literal,
-                'f' => .Literal,
-                'v' => .Literal,
+                't', 'n', 'r', 'a', 'e', 'f', 'v', '0', 'c' => .Literal,
                 '\\' => .Literal,
                 '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => .Literal,
                 '1'...'9' => .Backref,
