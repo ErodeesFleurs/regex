@@ -196,6 +196,26 @@ pub const Tokenizer = struct {
                 };
             }
 
+            // Octal escape: \o{NNN}
+            if (next_ch == 'o') {
+                if (self.position < self.input.len and self.input[self.position] == '{') {
+                    const oct_start = self.position + 1;
+                    var oct_end = oct_start;
+                    while (oct_end < self.input.len and std.ascii.isDigit(self.input[oct_end]) and self.input[oct_end] < '8') {
+                        oct_end += 1;
+                    }
+                    if (oct_end < self.input.len and self.input[oct_end] == '}' and oct_end > oct_start) {
+                        self.position = oct_end + 1;
+                        return .{
+                            .type = .Literal,
+                            .value = self.input[start_pos..self.position],
+                            .position = start_pos,
+                        };
+                    }
+                }
+                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+            }
+
             // Unicode named escape: \N{U+HHHH} or \N{U+HHHHHH}
             if (next_ch == 'N') {
                 if (self.position < self.input.len and self.input[self.position] == '{') {

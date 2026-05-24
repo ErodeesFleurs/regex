@@ -70,3 +70,11 @@ test "escape: \\N{U+HHHH} unicode code point" {
     try std.testing.expect(!try regex.isMatch(allocator, "\\N{U+0041}", "B"));
 }
 
+test "escape: \\o{NNN} octal" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\o{101}", "A"));
+    try std.testing.expect(try regex.isMatch(allocator, "\\o{102}", "B"));
+    try std.testing.expect(!try regex.isMatch(allocator, "\\o{101}", "B"));
+    try std.testing.expect(try regex.isMatch(allocator, "\\o{377}", "\u{00FF}"));
+}
+
