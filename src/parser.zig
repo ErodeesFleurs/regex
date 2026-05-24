@@ -518,6 +518,14 @@ pub const Parser = struct {
                             break :blk 0;
                         },
                         '0' => 0,
+                        'N' => blk: {
+                            // \N{U+HHHH} - Unicode code point
+                            if (token.value.len >= 6 and token.value[2] == '{' and token.value[3] == 'U' and token.value[4] == '+') {
+                                const hex = token.value[5 .. token.value.len - 1];
+                                break :blk std.fmt.parseInt(u21, hex, 16) catch token.value[1];
+                            }
+                            break :blk token.value[1];
+                        },
                         else => token.value[1],
                     };
                 } else {

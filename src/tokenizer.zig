@@ -196,6 +196,39 @@ pub const Tokenizer = struct {
                 };
             }
 
+            // Unicode named escape: \N{U+HHHH} or \N{U+HHHHHH}
+            if (next_ch == 'N') {
+                if (self.position < self.input.len and self.input[self.position] == '{') {
+                    const name_start = self.position + 1;
+                    var name_end = name_start;
+                    while (name_end < self.input.len and self.input[name_end] != '}') {
+                        name_end += 1;
+                    }
+                    if (name_end < self.input.len and self.input[name_end] == '}' and name_end > name_start) {
+                        const name = self.input[name_start..name_end];
+                        if (name.len >= 3 and name[0] == 'U' and name[1] == '+') {
+                            const hex = name[2..];
+                            var valid_hex = true;
+                            for (hex) |h| {
+                                if (!std.ascii.isHex(h)) {
+                                    valid_hex = false;
+                                    break;
+                                }
+                            }
+                            if (valid_hex) {
+                                self.position = name_end + 1;
+                                return .{
+                                    .type = .Literal,
+                                    .value = self.input[start_pos..self.position],
+                                    .position = start_pos,
+                                };
+                            }
+                        }
+                    }
+                }
+                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+            }
+
             // Unicode property: \p{...} or \P{...}
             if (next_ch == 'p' or next_ch == 'P') {
                 if (self.position < self.input.len and self.input[self.position] == '{') {

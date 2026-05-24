@@ -61,3 +61,12 @@ test "escape: \\v vertical tab" {
     const allocator = std.testing.allocator;
     try std.testing.expect(try regex.isMatch(allocator, "\\v", "\x0B"));
 }
+
+test "escape: \\N{U+HHHH} unicode code point" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "\\N{U+0041}", "A"));
+    try std.testing.expect(try regex.isMatch(allocator, "\\N{U+03B1}", "\u{03B1}"));
+    try std.testing.expect(try regex.isMatch(allocator, "\\N{U+1F600}", "\u{1F600}"));
+    try std.testing.expect(!try regex.isMatch(allocator, "\\N{U+0041}", "B"));
+}
+
