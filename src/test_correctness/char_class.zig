@@ -126,3 +126,68 @@ test "char class: negated shorthand inside class" {
     try std.testing.expect(!try regex.isMatch(allocator, "[\\D]", "5"));
     try std.testing.expect(try regex.isMatch(allocator, "[\\D]", "a"));
 }
+
+test "char class: POSIX [[:alpha:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[[:alpha:]]", "a"));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:alpha:]]", "Z"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:alpha:]]", "5"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:alpha:]]", " "));
+}
+
+test "char class: POSIX [[:digit:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[[:digit:]]", "0"));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:digit:]]", "9"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:digit:]]", "a"));
+}
+
+test "char class: POSIX [[:alnum:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[[:alnum:]]", "a"));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:alnum:]]", "5"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:alnum:]]", " "));
+}
+
+test "char class: POSIX [[:space:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[[:space:]]", " "));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:space:]]", "\t"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:space:]]", "a"));
+}
+
+test "char class: POSIX [[:lower:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[[:lower:]]", "a"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:lower:]]", "A"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:lower:]]", "5"));
+}
+
+test "char class: POSIX [[:upper:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[[:upper:]]", "A"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:upper:]]", "a"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:upper:]]", "5"));
+}
+
+test "char class: POSIX [[:xdigit:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[[:xdigit:]]", "a"));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:xdigit:]]", "F"));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:xdigit:]]", "5"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:xdigit:]]", "g"));
+}
+
+test "char class: POSIX negated [[:^alpha:]]" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(!try regex.isMatch(allocator, "[[:^alpha:]]", "a"));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:^alpha:]]", "5"));
+    try std.testing.expect(try regex.isMatch(allocator, "[[:^alpha:]]", " "));
+}
+
+test "char class: POSIX combined with range" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try regex.isMatch(allocator, "[a-c[:digit:]]", "a"));
+    try std.testing.expect(try regex.isMatch(allocator, "[a-c[:digit:]]", "5"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[a-c[:digit:]]", "z"));
+}

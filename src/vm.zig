@@ -1873,7 +1873,10 @@ pub const Vm = struct {
                     }
                 },
                 .CharClass => {
-                    if (sub_pos < input.len and inst.char_class.?.*.contains(input[sub_pos])) {
+                    const ch2 = if (sub_pos < input.len) input[sub_pos] else 0;
+                    const range_match2 = inst.char_class.?.*.contains(ch2);
+                    const posix_match2 = inst.char_class.?.*.containsPosixClass(ch2);
+                    if (sub_pos < input.len and (range_match2 or posix_match2)) {
                         sub_pc += 1;
                         sub_pos += 1;
                     } else {
@@ -2454,12 +2457,19 @@ pub const Vm = struct {
                 },
                 .CharClass => {
                     const ch = if (pos < input.len) input[pos] else 0;
-                    const matches = if (self.options.case_sensitive)
+                    const range_match = if (self.options.case_sensitive)
                         inst.char_class.?.*.contains(ch)
                     else
                         inst.char_class.?.*.contains(ch) or
                             inst.char_class.?.*.contains(std.ascii.toLower(ch)) or
                             inst.char_class.?.*.contains(std.ascii.toUpper(ch));
+                    const posix_match = if (self.options.case_sensitive)
+                        inst.char_class.?.*.containsPosixClass(ch)
+                    else
+                        inst.char_class.?.*.containsPosixClass(ch) or
+                            inst.char_class.?.*.containsPosixClass(std.ascii.toLower(ch)) or
+                            inst.char_class.?.*.containsPosixClass(std.ascii.toUpper(ch));
+                    const matches = range_match or posix_match;
                     if (pos < input.len and matches) {
                         pc += 1;
                         pos += 1;

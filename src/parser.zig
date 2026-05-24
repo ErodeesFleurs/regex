@@ -84,26 +84,37 @@ pub const CharClass = struct {
         start: u8,
         end: u8,
     };
-    
+
     ranges: std.ArrayList(CharRange),
+    posix_classes: std.ArrayList([]const u8),
     negated: bool,
     allocator: std.mem.Allocator,
-    
+
     pub fn init(allocator: std.mem.Allocator, negated: bool) CharClass {
         return .{
             .ranges = .empty,
+            .posix_classes = .empty,
             .negated = negated,
             .allocator = allocator,
         };
     }
-    
+
     pub fn deinit(self: *CharClass, allocator: std.mem.Allocator) void {
         _ = allocator;
+        for (self.posix_classes.items) |name| {
+            self.allocator.free(name);
+        }
+        self.posix_classes.deinit(self.allocator);
         self.ranges.deinit(self.allocator);
     }
-    
+
     pub fn addRange(self: *CharClass, start: u8, end: u8) !void {
         try self.ranges.append(self.allocator, .{ .start = start, .end = end });
+    }
+
+    pub fn addPosixClass(self: *CharClass, name: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, name);
+        try self.posix_classes.append(self.allocator, copy);
     }
 
     pub fn contains(self: CharClass, ch: u8) bool {
@@ -114,7 +125,59 @@ pub const CharClass = struct {
         }
         return self.negated;
     }
+
+    pub fn containsPosixClass(self: CharClass, ch: u8) bool {
+        if (self.posix_classes.items.len == 0) {
+            return false;
+        }
+        for (self.posix_classes.items) |name| {
+            if (isPosixClass(ch, name)) {
+                return !self.negated;
+            }
+        }
+        return self.negated;
+    }
 };
+
+/// Check if a character belongs to a POSIX character class.
+/// Supports: alpha, alnum, ascii, blank, cntrl, digit, graph, lower, print, punct, space, upper, word, xdigit
+fn isPosixClass(ch: u8, name: []const u8) bool {
+    const negated = name.len > 0 and name[0] == '^';
+    const class_name = if (negated) name[1..] else name;
+    const result = blk: {
+        if (std.mem.eql(u8, class_name, "alpha")) {
+            break :blk std.ascii.isAlphabetic(ch);
+        } else if (std.mem.eql(u8, class_name, "alnum")) {
+            break :blk std.ascii.isAlphanumeric(ch);
+        } else if (std.mem.eql(u8, class_name, "ascii")) {
+            break :blk ch < 128;
+        } else if (std.mem.eql(u8, class_name, "blank")) {
+            break :blk ch == ' ' or ch == '\t';
+        } else if (std.mem.eql(u8, class_name, "cntrl")) {
+            break :blk ch < 0x20 or ch == 0x7F;
+        } else if (std.mem.eql(u8, class_name, "digit")) {
+            break :blk std.ascii.isDigit(ch);
+        } else if (std.mem.eql(u8, class_name, "graph")) {
+            break :blk ch >= 0x21 and ch <= 0x7E;
+        } else if (std.mem.eql(u8, class_name, "lower")) {
+            break :blk std.ascii.isLower(ch);
+        } else if (std.mem.eql(u8, class_name, "print")) {
+            break :blk ch >= 0x20 and ch <= 0x7E;
+        } else if (std.mem.eql(u8, class_name, "punct")) {
+            break :blk std.ascii.isPunctuation(ch);
+        } else if (std.mem.eql(u8, class_name, "space")) {
+            break :blk ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r' or ch == '\x0C' or ch == '\x0B';
+        } else if (std.mem.eql(u8, class_name, "upper")) {
+            break :blk std.ascii.isUpper(ch);
+        } else if (std.mem.eql(u8, class_name, "word")) {
+            break :blk std.ascii.isAlphanumeric(ch) or ch == '_';
+        } else if (std.mem.eql(u8, class_name, "xdigit")) {
+            break :blk std.ascii.isHex(ch);
+        }
+        break :blk false;
+    };
+    return if (negated) !result else result;
+}
 
 pub const ParseErrorInfo = struct {
     message: []const u8,
@@ -714,6 +777,48 @@ pub const Parser = struct {
             }
 
             _ = self.tokenizer.nextToken();
+
+            // POSIX character class: [:name:]
+            const is_lbracket = t.type == .LBracket;
+            const is_literal_bracket = t.type == .Literal and t.value.len == 1 and t.value[0] == '[';
+            if (is_lbracket or is_literal_bracket) {
+                const next_t = self.tokenizer.peek();
+                if (next_t.type == .Literal and next_t.value.len == 1 and next_t.value[0] == ':') {
+                    // Consume ':'
+                    _ = self.tokenizer.nextToken();
+
+                    // Read the class name
+                    const name_start: usize = self.tokenizer.position;
+                    var name_end: usize = name_start;
+                    var found_end = false;
+                    while (self.tokenizer.position < self.tokenizer.input.len) {
+                        const ch = self.tokenizer.input[self.tokenizer.position];
+                        if (ch == ':' and self.tokenizer.position + 1 < self.tokenizer.input.len and self.tokenizer.input[self.tokenizer.position + 1] == ']') {
+                            found_end = true;
+                            name_end = self.tokenizer.position;
+                            // Consume ':]'
+                            self.tokenizer.position += 2;
+                            break;
+                        }
+                        self.tokenizer.position += 1;
+                    }
+
+                    if (found_end and name_end > name_start) {
+                        const name = self.tokenizer.input[name_start..name_end];
+                        if (name.len > 0 and name[0] == '^') {
+                            // Negated POSIX class: add with ^ prefix for isPosixClass to handle
+                            try cc.addPosixClass(name);
+                        } else {
+                            try cc.addPosixClass(name);
+                        }
+                        continue;
+                    } else {
+                        // Not a valid POSIX class, rewind and treat ':' and '[' as literal chars
+                        self.tokenizer.position = name_start;
+                        // Fall through to normal literal handling for ':' and '['
+                    }
+                }
+            }
 
             // Process shorthand escape sequences inside char class (\d, \w, \s, etc.)
             if (t.value.len == 2 and t.value[0] == '\\') {

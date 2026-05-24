@@ -119,6 +119,30 @@ pub const Regex = struct {
             .pos = 0,
         };
     }
+
+    pub fn matchAll(self: *Regex, text: []const u8) !std.ArrayList([]const u8) {
+        var results: std.ArrayList([]const u8) = .empty;
+        errdefer results.deinit(self.allocator);
+
+        var iter = self.findIter(text);
+        while (true) {
+            var result = try iter.next();
+            if (result) |*r| {
+                try results.append(self.allocator, text[r.start..r.end]);
+                r.deinit();
+            } else {
+                break;
+            }
+        }
+
+        return results;
+    }
+
+    pub fn isMatchFull(self: *Regex, text: []const u8) !bool {
+        var result = try self.vm.exec(text, 0);
+        defer result.deinit();
+        return result.matched and result.end == text.len;
+    }
     
     fn appendReplacement(self: *Regex, result: *std.ArrayList(u8), text: []const u8, match_result: MatchResult, replacement: []const u8) !void {
         // Append replacement text (supports $0, $1, ..., ${10}, ${name}, $&, $`, $', $$)
@@ -514,4 +538,96 @@ test "regex options" {
     defer regex.deinit();
     
     try std.testing.expect(try regex.isMatch("hello"));
+}
+
+test "regex matchAll" {
+    const allocator = std.testing.allocator;
+    
+    var regex = try Regex.compile(allocator, "\\d+");
+    defer regex.deinit();
+    
+    var matches = try regex.matchAll("abc 123 def 456 ghi 789");
+    defer matches.deinit(allocator);
+    
+    try std.testing.expectEqual(@as(usize, 3), matches.items.len);
+    try std.testing.expectEqualStrings("123", matches.items[0]);
+    try std.testing.expectEqualStrings("456", matches.items[1]);
+    try std.testing.expectEqualStrings("789", matches.items[2]);
+}
+
+test "regex matchAll no match" {
+    const allocator = std.testing.allocator;
+    
+    var regex = try Regex.compile(allocator, "\\d+");
+    defer regex.deinit();
+    
+    var matches = try regex.matchAll("abc def ghi");
+    defer matches.deinit(allocator);
+    
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+}
+
+test "regex isMatchFull" {
+    const allocator = std.testing.allocator;
+    
+    var regex = try Regex.compile(allocator, "^\\d+$");
+    defer regex.deinit();
+    
+    try std.testing.expect(try regex.isMatchFull("123"));
+    try std.testing.expect(!try regex.isMatchFull("abc"));
+    try std.testing.expect(!try regex.isMatchFull("123abc"));
+}
+
+test "regex isMatchFull with literal" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "hello");
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatchFull("hello"));
+    try std.testing.expect(!try regex.isMatchFull("hello world"));
+    try std.testing.expect(!try regex.isMatchFull("say hello"));
+}
+
+test "regex literal quote \\Q...\\E" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "\\Qa.b*c\\E+");
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatch("a.b*ca.b*c"));
+    try std.testing.expect(try regex.isMatch("a.b*c"));
+    try std.testing.expect(try regex.isMatch("a.b*cc"));
+    try std.testing.expect(!try regex.isMatch("abbc"));
+}
+
+test "regex literal quote with special chars" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "\\Q[$^|]\\E");
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatch("[$^|]"));
+    try std.testing.expect(try regex.isMatch("[$^|]x"));
+    try std.testing.expect(!try regex.isMatch("[$^|"));
+}
+
+test "regex literal quote without end" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "\\Qabc");
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatch("abc"));
+    try std.testing.expect(!try regex.isMatch("ab"));
+}
+
+test "regex literal quote empty" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "a\\Q\\Eb");
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatch("ab"));
+    try std.testing.expect(!try regex.isMatch("a+b"));
 }

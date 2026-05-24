@@ -79,14 +79,16 @@ pub const Token = struct {
 pub const Tokenizer = struct {
     input: []const u8,
     position: usize,
-    
+    literal_quote_mode: bool,
+
     pub fn init(input: []const u8) Tokenizer {
         return .{
             .input = input,
             .position = 0,
+            .literal_quote_mode = false,
         };
     }
-    
+
     pub fn nextToken(self: *Tokenizer) Token {
         if (self.position >= self.input.len) {
             return .{
@@ -95,11 +97,30 @@ pub const Tokenizer = struct {
                 .position = self.position,
             };
         }
-        
+
+        // In literal quote mode, all characters are literals until \E
+        if (self.literal_quote_mode) {
+            const ch = self.input[self.position];
+            self.position += 1;
+
+            // Check for \E to end quote mode
+            if (ch == '\\' and self.position < self.input.len and self.input[self.position] == 'E') {
+                self.literal_quote_mode = false;
+                self.position += 1;
+                return self.nextToken();
+            }
+
+            return .{
+                .type = .Literal,
+                .value = self.input[self.position - 1..self.position],
+                .position = self.position - 1,
+            };
+        }
+
         const start_pos = self.position;
         const ch = self.input[self.position];
         self.position += 1;
-        
+
         // Process escape sequences
         if (ch == '\\' and self.position < self.input.len) {
             const next_ch = self.input[self.position];
@@ -203,6 +224,12 @@ pub const Tokenizer = struct {
                 };
             }
 
+            // Literal quote: \Q
+            if (next_ch == 'Q') {
+                self.literal_quote_mode = true;
+                return self.nextToken();
+            }
+
             const token_type: TokenType = switch (next_ch) {
                 'd' => .Digit,
                 'D' => .NotDigit,
@@ -274,8 +301,10 @@ pub const Tokenizer = struct {
     
     pub fn peek(self: *Tokenizer) Token {
         const saved_pos = self.position;
+        const saved_quote_mode = self.literal_quote_mode;
         const token = self.nextToken();
         self.position = saved_pos;
+        self.literal_quote_mode = saved_quote_mode;
         return token;
     }
     
@@ -343,4 +372,38 @@ test "tokenizer special chars as literals" {
     const t2 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t2.type);
     try std.testing.expectEqualStrings("\\*", t2.value);
+}
+
+test "tokenizer literal quote" {
+    var tokenizer = Tokenizer.init("\\Qa.b*c\\E+");
+    
+    const t1 = tokenizer.nextToken();
+    try std.testing.expectEqual(.Literal, t1.type);
+    try std.testing.expectEqualStrings("a", t1.value);
+    
+    const t2 = tokenizer.nextToken();
+    try std.testing.expectEqual(.Literal, t2.type);
+    try std.testing.expectEqualStrings(".", t2.value);
+    
+    const t3 = tokenizer.nextToken();
+    try std.testing.expectEqual(.Literal, t3.type);
+    try std.testing.expectEqualStrings("b", t3.value);
+    
+    const t4 = tokenizer.nextToken();
+    try std.testing.expectEqual(.Literal, t4.type);
+    try std.testing.expectEqualStrings("*", t4.value);
+    
+    const t5 = tokenizer.nextToken();
+    try std.testing.expectEqual(.Literal, t5.type);
+    try std.testing.expectEqualStrings("c", t5.value);
+    
+    const t6 = tokenizer.nextToken();
+    try std.testing.expectEqual(.Plus, t6.type);
+}
+
+test "tokenizer literal quote with empty content" {
+    var tokenizer = Tokenizer.init("\\Q\\E+");
+    
+    const t1 = tokenizer.nextToken();
+    try std.testing.expectEqual(.Plus, t1.type);
 }

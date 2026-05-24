@@ -37,6 +37,20 @@ pub fn find(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8)
     return try regex.find(text);
 }
 
+/// 便捷的完整匹配函数（必须消费整个字符串）
+pub fn isMatchFull(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8) !bool {
+    var regex = try Regex.compile(allocator, pattern);
+    defer regex.deinit();
+    return try regex.isMatchFull(text);
+}
+
+/// 便捷的全匹配切片函数（返回所有匹配文本切片）
+pub fn matchAll(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8) !std.ArrayList([]const u8) {
+    var regex = try Regex.compile(allocator, pattern);
+    defer regex.deinit();
+    return try regex.matchAll(text);
+}
+
 test "root basic usage" {
     const allocator = std.testing.allocator;
 
