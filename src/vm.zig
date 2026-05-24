@@ -1699,6 +1699,32 @@ fn matchUnicodeProperty(input: []const u8, pos: usize, property: []const u8, neg
     }
 }
 
+/// Check if a character at position `pos` in `input` is a Unicode word character.
+/// Word characters include: ASCII letters/digits/underscore, Unicode letters (L),
+/// decimal digits (Nd), and marks (M).
+fn isUnicodeWordChar(input: []const u8, pos: usize) bool {
+    if (pos >= input.len) return false;
+    var start = pos;
+    const ch = input[start];
+    // ASCII fast path
+    if (ch < 128) {
+        return std.ascii.isAlphanumeric(ch) or ch == '_';
+    }
+    // If pos points to a continuation byte (0x80-0xBF), walk back to the start byte
+    if (ch >= 0x80 and ch <= 0xBF) {
+        while (start > 0) {
+            start -= 1;
+            if (input[start] >= 0xC0 or input[start] < 0x80) break;
+        }
+    }
+    if (start >= input.len) return false;
+    const start_byte = input[start];
+    const byte_len = std.unicode.utf8ByteSequenceLength(start_byte) catch return false;
+    if (start + byte_len > input.len) return false;
+    const cp = std.unicode.utf8Decode(input[start..start + byte_len]) catch return false;
+    return isUnicodeProperty(cp, "L") or isUnicodeProperty(cp, "Nd") or isUnicodeProperty(cp, "M");
+}
+
 /// Match a single grapheme cluster (simplified implementation).
 /// Returns the total byte length of the cluster, or null if no cluster at pos.
 fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
@@ -2086,16 +2112,8 @@ pub const Vm = struct {
                     }
                 },
                 .WordBoundary => {
-                    const is_word = struct {
-                        pub fn call(ch: u8) bool {
-                            return (ch >= 'a' and ch <= 'z') or
-                                (ch >= 'A' and ch <= 'Z') or
-                                (ch >= '0' and ch <= '9') or
-                                ch == '_';
-                        }
-                    }.call;
-                    const left = if (sub_pos > 0) is_word(input[sub_pos - 1]) else false;
-                    const right = if (sub_pos < input.len) is_word(input[sub_pos]) else false;
+                    const left = if (sub_pos > 0) isUnicodeWordChar(input, sub_pos - 1) else false;
+                    const right = if (sub_pos < input.len) isUnicodeWordChar(input, sub_pos) else false;
                     if (left != right) {
                         sub_pc += 1;
                     } else {
@@ -2109,16 +2127,8 @@ pub const Vm = struct {
                     }
                 },
                 .NotWordBoundary => {
-                    const is_word = struct {
-                        pub fn call(ch: u8) bool {
-                            return (ch >= 'a' and ch <= 'z') or
-                                (ch >= 'A' and ch <= 'Z') or
-                                (ch >= '0' and ch <= '9') or
-                                ch == '_';
-                        }
-                    }.call;
-                    const left = if (sub_pos > 0) is_word(input[sub_pos - 1]) else false;
-                    const right = if (sub_pos < input.len) is_word(input[sub_pos]) else false;
+                    const left = if (sub_pos > 0) isUnicodeWordChar(input, sub_pos - 1) else false;
+                    const right = if (sub_pos < input.len) isUnicodeWordChar(input, sub_pos) else false;
                     if (left == right) {
                         sub_pc += 1;
                     } else {
@@ -2632,16 +2642,8 @@ pub const Vm = struct {
                     }
                 },
                 .WordBoundary => {
-                    const is_word = struct {
-                        pub fn call(ch: u8) bool {
-                            return (ch >= 'a' and ch <= 'z') or
-                                (ch >= 'A' and ch <= 'Z') or
-                                (ch >= '0' and ch <= '9') or
-                                ch == '_';
-                        }
-                    }.call;
-                    const left = if (pos > 0) is_word(input[pos - 1]) else false;
-                    const right = if (pos < input.len) is_word(input[pos]) else false;
+                    const left = if (pos > 0) isUnicodeWordChar(input, pos - 1) else false;
+                    const right = if (pos < input.len) isUnicodeWordChar(input, pos) else false;
                     if (left != right) {
                         pc += 1;
                     } else {
@@ -2656,16 +2658,8 @@ pub const Vm = struct {
                     }
                 },
                 .NotWordBoundary => {
-                    const is_word = struct {
-                        pub fn call(ch: u8) bool {
-                            return (ch >= 'a' and ch <= 'z') or
-                                (ch >= 'A' and ch <= 'Z') or
-                                (ch >= '0' and ch <= '9') or
-                                ch == '_';
-                        }
-                    }.call;
-                    const left = if (pos > 0) is_word(input[pos - 1]) else false;
-                    const right = if (pos < input.len) is_word(input[pos]) else false;
+                    const left = if (pos > 0) isUnicodeWordChar(input, pos - 1) else false;
+                    const right = if (pos < input.len) isUnicodeWordChar(input, pos) else false;
                     if (left == right) {
                         pc += 1;
                     } else {

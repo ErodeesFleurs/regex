@@ -52,13 +52,13 @@ pub const Compiler = struct {
                         .opcode = .CharUtf8,
                         .char_codepoint = @intCast(value),
                     });
-                } else if (value <= 255) {
+                } else if (value <= 127) {
                     _ = try self.bytecode.emit(.{
                         .opcode = .Char,
                         .char = @intCast(value),
                     });
                 } else {
-                    // Encode Unicode code point > 255 as UTF-8 byte sequence (case-sensitive mode)
+                    // Encode Unicode code point > 127 as UTF-8 byte sequence (case-sensitive mode)
                     var buf: [4]u8 = undefined;
                     const len = std.unicode.utf8Encode(@intCast(value), &buf) catch {
                         // Invalid code point, emit a placeholder

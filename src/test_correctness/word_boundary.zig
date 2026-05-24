@@ -57,3 +57,60 @@ test "word boundary: \\b underscore" {
     try std.testing.expect(!try regex.isMatch(allocator, "a\\b_", "a_"));
     try std.testing.expect(!try regex.isMatch(allocator, "a\\b_", "a _"));
 }
+
+test "word boundary: unicode letters" {
+    const allocator = std.testing.allocator;
+    // Unicode letters (e.g., Greek, Cyrillic) should be treated as word characters
+    var re1 = try regex.Regex.compile(allocator, "\\bαβγ\\b");
+    defer re1.deinit();
+    try std.testing.expect(try re1.isMatch("αβγ"));
+    try std.testing.expect(!try re1.isMatch("αβγδ"));
+
+    var re2 = try regex.Regex.compile(allocator, "\\bпривет\\b");
+    defer re2.deinit();
+    try std.testing.expect(try re2.isMatch("привет"));
+    try std.testing.expect(try re2.isMatch("привет!"));
+    try std.testing.expect(!try re2.isMatch("приветы"));
+}
+
+test "word boundary: mixed ascii and unicode" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "\\bcafé\\b");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("café"));
+    try std.testing.expect(try re.isMatch("café!"));
+    try std.testing.expect(!try re.isMatch("écafé"));
+    try std.testing.expect(!try re.isMatch("caféé"));
+}
+
+test "word boundary: chinese characters" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "\\b你好\\b");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("你好"));
+    try std.testing.expect(!try re.isMatch("你好世界"));
+}
+
+test "word boundary: emoji" {
+    const allocator = std.testing.allocator;
+    // Emoji are not word characters, so there should be a boundary between word and emoji
+    var re = try regex.Regex.compile(allocator, "\\bhello\\b");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("hello"));
+
+    var result1 = try re.find("hello😀");
+    if (result1) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+
+    var result2 = try re.find("😀hello");
+    if (result2) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+}
