@@ -213,8 +213,14 @@ pub const Parser = struct {
     last_error: ?ParseErrorInfo,
 
     pub fn init(allocator: std.mem.Allocator, input: []const u8) Parser {
+        return initWithOptions(allocator, input, .{});
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, input: []const u8, options: RegexOptions) Parser {
+        var tokenizer = Tokenizer.init(input);
+        tokenizer.free_spacing = options.free_spacing;
         return .{
-            .tokenizer = Tokenizer.init(input),
+            .tokenizer = tokenizer,
             .allocator = allocator,
             .group_counter = 0,
             .group_names = std.StringHashMap(usize).init(allocator),
@@ -1193,8 +1199,8 @@ pub const Parser = struct {
                         self.setErrorAtToken("Unexpected token", next);
                         return error.UnexpectedToken;
                     },
-                    'i', 'm', 's' => {
-                        // Inline flag (?i:...), (?m:...), (?s:...) or global (?i), (?m), (?s)
+                    'i', 'm', 's', 'x' => {
+                        // Inline flag (?i:...), (?m:...), (?s:...), (?x:...) or global (?i), (?m), (?s), (?x)
                         var opts = RegexOptions{};
                         var flag_bits: usize = 0;
 
@@ -1203,6 +1209,7 @@ pub const Parser = struct {
                             'i' => { opts.case_sensitive = false; flag_bits |= 1; },
                             'm' => { opts.multiline = true; flag_bits |= 2; },
                             's' => { opts.dot_matches_newline = true; flag_bits |= 4; },
+                            'x' => { opts.free_spacing = true; flag_bits |= 8; },
                             else => unreachable,
                         }
 
@@ -1211,12 +1218,13 @@ pub const Parser = struct {
                             const next_flag = self.tokenizer.peek();
                             if (next_flag.type == .Literal and next_flag.value.len == 1) {
                                 const ch = next_flag.value[0];
-                                if (ch == 'i' or ch == 'm' or ch == 's') {
+                                if (ch == 'i' or ch == 'm' or ch == 's' or ch == 'x') {
                                     _ = self.tokenizer.nextToken();
                                     switch (ch) {
                                         'i' => { opts.case_sensitive = false; flag_bits |= 1; },
                                         'm' => { opts.multiline = true; flag_bits |= 2; },
                                         's' => { opts.dot_matches_newline = true; flag_bits |= 4; },
+                                        'x' => { opts.free_spacing = true; flag_bits |= 8; },
                                         else => unreachable,
                                     }
                                     continue;
@@ -1229,6 +1237,10 @@ pub const Parser = struct {
                         if (next.type == .Literal and next.value.len == 1 and next.value[0] == ':') {
                             // Scoped flag (?i:...)
                             _ = self.tokenizer.nextToken(); // consume ':'
+                            const old_free_spacing = self.tokenizer.free_spacing;
+                            if (flag_bits & 8 != 0) {
+                                self.tokenizer.free_spacing = true;
+                            }
                             const inner = try self.parseExpression() orelse {
                                 self.setErrorAtToken("Empty group", self.tokenizer.peek());
                                 return error.EmptyGroup;
@@ -1237,6 +1249,9 @@ pub const Parser = struct {
                                 self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
                                 return error.UnexpectedToken;
                             };
+                            if (flag_bits & 8 != 0) {
+                                self.tokenizer.free_spacing = old_free_spacing;
+                            }
                             const node = try self.allocator.create(AstNode);
                             node.* = .{
                                 .type = .InlineFlag,
@@ -1251,6 +1266,9 @@ pub const Parser = struct {
                         } else if (next.type == .RParen) {
                             // Global flag (?i)
                             _ = self.tokenizer.nextToken(); // consume ')'
+                            if (flag_bits & 8 != 0) {
+                                self.tokenizer.free_spacing = true;
+                            }
                             const node = try self.allocator.create(AstNode);
                             node.* = .{
                                 .type = .InlineFlag,

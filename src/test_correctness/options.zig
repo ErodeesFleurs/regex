@@ -172,3 +172,41 @@ test "options: combined global inline flag (?im)" {
     try std.testing.expect(try re.isMatch("HELLO"));
     try std.testing.expect(try re.isMatch("hello"));
 }
+
+test "options: free-spacing via RegexOptions" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compileWithOptions(allocator, "h e l l o", .{ .free_spacing = true });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("hello"));
+}
+
+test "options: free-spacing with comment" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compileWithOptions(allocator, "hello # this is a comment\nworld", .{ .free_spacing = true });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("helloworld"));
+}
+
+test "options: free-spacing preserves char class whitespace" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compileWithOptions(allocator, "[a z]", .{ .free_spacing = true });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("a"));
+    try std.testing.expect(try re.isMatch("z"));
+    try std.testing.expect(try re.isMatch(" "));
+    try std.testing.expect(!try re.isMatch("b"));
+}
+
+test "options: global inline flag (?x)" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(?x)h e l l o");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("hello"));
+}
+
+test "options: global inline flag (?x) with comment" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(?x)hello # match greeting\nworld");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("helloworld"));
+}

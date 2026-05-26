@@ -369,6 +369,7 @@ pub const Compiler = struct {
                     if (flag_bits & 1 != 0) new_opts.case_sensitive = node.options.?.case_sensitive;
                     if (flag_bits & 2 != 0) new_opts.multiline = node.options.?.multiline;
                     if (flag_bits & 4 != 0) new_opts.dot_matches_newline = node.options.?.dot_matches_newline;
+                    if (flag_bits & 8 != 0) new_opts.free_spacing = node.options.?.free_spacing;
                 }
                 self.options = new_opts;
                 _ = try self.bytecode.emit(.{

@@ -80,12 +80,16 @@ pub const Tokenizer = struct {
     input: []const u8,
     position: usize,
     literal_quote_mode: bool,
+    free_spacing: bool,
+    char_class_depth: usize,
 
     pub fn init(input: []const u8) Tokenizer {
         return .{
             .input = input,
             .position = 0,
             .literal_quote_mode = false,
+            .free_spacing = false,
+            .char_class_depth = 0,
         };
     }
 
@@ -114,6 +118,33 @@ pub const Tokenizer = struct {
                 .type = .Literal,
                 .value = self.input[self.position - 1..self.position],
                 .position = self.position - 1,
+            };
+        }
+
+        // In free-spacing mode, skip whitespace and comments outside character classes
+        if (self.free_spacing and self.char_class_depth == 0) {
+            while (self.position < self.input.len) {
+                const c = self.input[self.position];
+                if (std.ascii.isWhitespace(c)) {
+                    self.position += 1;
+                    continue;
+                }
+                if (c == '#') {
+                    // Skip comment to end of line
+                    while (self.position < self.input.len and self.input[self.position] != '\n') {
+                        self.position += 1;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+
+        if (self.position >= self.input.len) {
+            return .{
+                .type = .EOF,
+                .value = "",
+                .position = self.position,
             };
         }
 
@@ -342,8 +373,16 @@ pub const Tokenizer = struct {
             '{' => .LBrace,
             '}' => .RBrace,
             // ',' is a literal in regex (only has special meaning in quantifier {n,m})
-            '[' => .LBracket,
-            ']' => .RBracket,
+            '[' => blk: {
+                self.char_class_depth += 1;
+                break :blk .LBracket;
+            },
+            ']' => blk: {
+                if (self.char_class_depth > 0) {
+                    self.char_class_depth -= 1;
+                }
+                break :blk .RBracket;
+            },
             else => .Literal,
         };
 

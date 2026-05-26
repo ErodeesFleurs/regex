@@ -23,7 +23,7 @@ pub const Regex = struct {
     }
 
     pub fn compileWithOptions(allocator: std.mem.Allocator, pattern: []const u8, options: RegexOptions) !Regex {
-        var parser = Parser.init(allocator, pattern);
+        var parser = Parser.initWithOptions(allocator, pattern, options);
         defer parser.deinit();
         const ast = parser.parse() catch |err| {
             if (parser.last_error) |last_err| {
