@@ -210,3 +210,41 @@ test "options: global inline flag (?x) with comment" {
     defer re.deinit();
     try std.testing.expect(try re.isMatch("helloworld"));
 }
+
+test "exec: match from position" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "world");
+    defer re.deinit();
+
+    var result = try re.exec("hello world", 0);
+    defer result.deinit();
+    try std.testing.expect(!result.matched);
+
+    var result2 = try re.exec("hello world", 6);
+    defer result2.deinit();
+    try std.testing.expect(result2.matched);
+    try std.testing.expectEqual(@as(usize, 6), result2.start);
+    try std.testing.expectEqual(@as(usize, 11), result2.end);
+}
+
+test "exec: match with captures from position" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(\\w+) (\\w+)");
+    defer re.deinit();
+
+    var result = try re.exec("hello world foo bar", 6);
+    defer result.deinit();
+    try std.testing.expect(result.matched);
+    try std.testing.expectEqual(@as(usize, 6), result.start);
+    try std.testing.expectEqual(@as(usize, 15), result.end);
+}
+
+test "exec: no match beyond end" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "hello");
+    defer re.deinit();
+
+    var result = try re.exec("hello", 5);
+    defer result.deinit();
+    try std.testing.expect(!result.matched);
+}

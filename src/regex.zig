@@ -86,10 +86,14 @@ pub const Regex = struct {
         return null;
     }
     
+    pub fn exec(self: *Regex, text: []const u8, start_pos: usize) !MatchResult {
+        return try self.vm.exec(text, start_pos);
+    }
+
     pub fn isMatch(self: *Regex, text: []const u8) !bool {
         return try self.vm.match(text);
     }
-    
+
     pub fn find(self: *Regex, text: []const u8) !?MatchResult {
         return try self.vm.find(text);
     }

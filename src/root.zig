@@ -44,6 +44,13 @@ pub fn isMatchFull(allocator: std.mem.Allocator, pattern: []const u8, text: []co
     return try regex.isMatchFull(text);
 }
 
+/// 便捷的从指定位置匹配函数
+pub fn exec(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8, start_pos: usize) !MatchResult {
+    var regex = try Regex.compile(allocator, pattern);
+    defer regex.deinit();
+    return try regex.exec(text, start_pos);
+}
+
 /// 便捷的全匹配切片函数（返回所有匹配文本切片）
 pub fn matchAll(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8) !std.ArrayList([]const u8) {
     var regex = try Regex.compile(allocator, pattern);
