@@ -715,21 +715,56 @@ pub const Parser = struct {
             },
             .NamedBackref => {
                 _ = self.tokenizer.nextToken();
-                // token.value is like "\g<name>" or "\k<name>"
-                // Extract name between < and >
-                const name_start = std.mem.indexOf(u8, token.value, "<") orelse {
+                // token.value is like "\g<name>", "\k<name>", "\g{-1}", "\g{+1}", "\g{name}"
+                // Determine delimiter: <...> or {...}
+                var group_idx: usize = 0;
+
+                if (std.mem.indexOf(u8, token.value, "<")) |name_start| {
+                    if (std.mem.lastIndexOf(u8, token.value, ">")) |name_end| {
+                        const ref = token.value[name_start + 1 .. name_end];
+                        group_idx = self.group_names.get(ref) orelse {
+                            self.setErrorAtToken("Unknown named capture group", token);
+                            return error.InvalidBackref;
+                        };
+                    } else {
+                        self.setErrorAtToken("Invalid named backreference syntax", token);
+                        return error.InvalidBackref;
+                    }
+                } else if (std.mem.indexOf(u8, token.value, "{")) |brace_start| {
+                    if (std.mem.lastIndexOf(u8, token.value, "}")) |brace_end| {
+                        const ref = token.value[brace_start + 1 .. brace_end];
+                        // Check for relative reference: \g{-N} or \g{+N}
+                        if (ref.len >= 2 and (ref[0] == '-' or ref[0] == '+')) {
+                            const rel = std.fmt.parseInt(isize, ref, 10) catch {
+                                self.setErrorAtToken("Invalid relative backreference", token);
+                                return error.InvalidBackref;
+                            };
+                            if (rel < 0) {
+                                // \g{-1} refers to the last defined group
+                                group_idx = if (self.group_counter >= @abs(rel)) self.group_counter - @abs(rel) + 1 else 0;
+                            } else {
+                                // \g{+1} refers to the next group to be defined (forward reference)
+                                group_idx = self.group_counter + @abs(rel);
+                            }
+                        } else if (std.fmt.parseInt(usize, ref, 10)) |n| {
+                            // Numeric absolute reference: \g{1}
+                            group_idx = n;
+                        } else |_| {
+                            // Named reference in braces: \g{name}
+                            group_idx = self.group_names.get(ref) orelse {
+                                self.setErrorAtToken("Unknown named capture group", token);
+                                return error.InvalidBackref;
+                            };
+                        }
+                    } else {
+                        self.setErrorAtToken("Invalid named backreference syntax", token);
+                        return error.InvalidBackref;
+                    }
+                } else {
                     self.setErrorAtToken("Invalid named backreference syntax", token);
                     return error.InvalidBackref;
-                };
-                const name_end = std.mem.lastIndexOf(u8, token.value, ">") orelse {
-                    self.setErrorAtToken("Invalid named backreference syntax", token);
-                    return error.InvalidBackref;
-                };
-                const name = token.value[name_start + 1 .. name_end];
-                const group_idx = self.group_names.get(name) orelse {
-                    self.setErrorAtToken("Unknown named capture group", token);
-                    return error.InvalidBackref;
-                };
+                }
+
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
                     .type = .Backref,

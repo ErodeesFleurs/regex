@@ -178,3 +178,34 @@ test "named backref: multiple groups" {
     try std.testing.expect(try re.isMatch("abc-def def-abc"));
     try std.testing.expect(!try re.isMatch("abc-def abc-def"));
 }
+
+// Relative backreferences: \g{-1}, \g{-2}
+test "relative backref: \\g{-1}" {
+    const allocator = std.testing.allocator;
+    // \\g{-1} refers to the most recent capture group
+    var re = try regex.compile(allocator, "(\\w+) \\g{-1}");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("hello hello"));
+    try std.testing.expect(!try re.isMatch("hello world"));
+}
+
+test "relative backref: \\g{-2}" {
+    const allocator = std.testing.allocator;
+    // \\g{-2} refers to the second most recent capture group
+    var re = try regex.compile(allocator, "(a)(b)(c) \\g{-2}");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("abc b"));
+    try std.testing.expect(!try re.isMatch("abc c"));
+}
+
+test "relative backref: numeric \\g{1}" {
+    const allocator = std.testing.allocator;
+    // \\g{1} is equivalent to \\1
+    var re = try regex.compile(allocator, "(\\w+) \\g{1}");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("test test"));
+    try std.testing.expect(!try re.isMatch("test other"));
+}

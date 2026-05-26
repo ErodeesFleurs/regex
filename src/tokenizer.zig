@@ -316,7 +316,7 @@ pub const Tokenizer = struct {
                 }
             }
 
-            // Named backreference: \g<name> or \k<name>
+            // Named backreference: \g<name>, \k<name>, \g{-1}, \g{+1}, \g{name}
             if (next_ch == 'g' or next_ch == 'k') {
                 if (self.position < self.input.len and self.input[self.position] == '<') {
                     const name_start = self.position + 1;
@@ -326,6 +326,21 @@ pub const Tokenizer = struct {
                     }
                     if (name_end < self.input.len and self.input[name_end] == '>' and name_end > name_start) {
                         self.position = name_end + 1;
+                        return .{
+                            .type = .NamedBackref,
+                            .value = self.input[start_pos..self.position],
+                            .position = start_pos,
+                        };
+                    }
+                } else if (self.position < self.input.len and self.input[self.position] == '{') {
+                    // \g{...} format (relative/absolute numeric or braced name)
+                    const content_start = self.position + 1;
+                    var content_end = content_start;
+                    while (content_end < self.input.len and self.input[content_end] != '}') {
+                        content_end += 1;
+                    }
+                    if (content_end < self.input.len and self.input[content_end] == '}' and content_end > content_start) {
+                        self.position = content_end + 1;
                         return .{
                             .type = .NamedBackref,
                             .value = self.input[start_pos..self.position],
