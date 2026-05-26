@@ -181,6 +181,25 @@ pub const Regex = struct {
                         try result.appendSlice(self.allocator, text[match_result.end..]);
                     }
                     rep_i += 2;
+                } else if (next_ch == '+') {
+                    // $+ - last capture group that matched
+                    var last_group_idx: ?usize = null;
+                    var group_idx: usize = 1;
+                    while (group_idx * 2 + 1 < match_result.captures.items.len) : (group_idx += 1) {
+                        const start_slot = group_idx * 2;
+                        const end_slot = group_idx * 2 + 1;
+                        if (match_result.captures.items[start_slot] != null and
+                            match_result.captures.items[end_slot] != null)
+                        {
+                            last_group_idx = group_idx;
+                        }
+                    }
+                    if (last_group_idx) |idx| {
+                        if (match_result.getGroup(text, idx)) |group_text| {
+                            try result.appendSlice(self.allocator, group_text);
+                        }
+                    }
+                    rep_i += 2;
                 } else if (next_ch == '{') {
                     // ${name} or ${10}
                     var end_idx = rep_i + 2;

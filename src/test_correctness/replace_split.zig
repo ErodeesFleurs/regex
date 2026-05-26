@@ -157,3 +157,16 @@ test "split: limit greater than matches" {
     try std.testing.expectEqualStrings("a", parts.items[0]);
     try std.testing.expectEqualStrings("b", parts.items[1]);
 }
+
+test "replace: $+ last capture group" {
+    const allocator = std.testing.allocator;
+    // $+ references the last capture group that matched
+    try expectReplace(allocator, "(\\w+) (\\w+)", "hello world", "$+", "world");
+    try expectReplace(allocator, "(a)(b)(c)", "abc", "$+", "c");
+}
+
+test "replace: $+ with no captures" {
+    const allocator = std.testing.allocator;
+    // $+ with no capture groups: nothing inserted
+    try expectReplace(allocator, "abc", "abc", "[$+]", "[]");
+}
