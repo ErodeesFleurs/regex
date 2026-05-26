@@ -191,3 +191,34 @@ test "char class: POSIX combined with range" {
     try std.testing.expect(try regex.isMatch(allocator, "[a-c[:digit:]]", "5"));
     try std.testing.expect(!try regex.isMatch(allocator, "[a-c[:digit:]]", "z"));
 }
+
+test "char class: Unicode range with \\u{}" {
+    const allocator = std.testing.allocator;
+    // Cyrillic range: \\u{0400}-\\u{04FF}
+    try std.testing.expect(try regex.isMatch(allocator, "[\\u{0400}-\\u{04FF}]", "а"));
+    try std.testing.expect(try regex.isMatch(allocator, "[\\u{0400}-\\u{04FF}]", "Я"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[\\u{0400}-\\u{04FF}]", "a"));
+}
+
+test "char class: Unicode range with \\x{}" {
+    const allocator = std.testing.allocator;
+    // Latin Extended-A range: \\u{0100}-\\u{017F}
+    try std.testing.expect(try regex.isMatch(allocator, "[\\x{0100}-\\x{017F}]", "Ā"));
+    try std.testing.expect(try regex.isMatch(allocator, "[\\x{0100}-\\x{017F}]", "ſ"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[\\x{0100}-\\x{017F}]", "a"));
+}
+
+test "char class: mixed ASCII and Unicode range" {
+    const allocator = std.testing.allocator;
+    // a-z plus Cyrillic
+    try std.testing.expect(try regex.isMatch(allocator, "[a-z\\u{0400}-\\u{04FF}]", "a"));
+    try std.testing.expect(try regex.isMatch(allocator, "[a-z\\u{0400}-\\u{04FF}]", "я"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[a-z\\u{0400}-\\u{04FF}]", "1"));
+}
+
+test "char class: Unicode literal character" {
+    const allocator = std.testing.allocator;
+    // Direct multi-byte UTF-8 character in class
+    try std.testing.expect(try regex.isMatch(allocator, "[中]", "中"));
+    try std.testing.expect(!try regex.isMatch(allocator, "[中]", "a"));
+}

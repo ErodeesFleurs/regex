@@ -189,9 +189,25 @@ pub const Tokenizer = struct {
                     return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
                 }
 
-            // Unicode escape: \uNNNN
+            // Unicode escape: \uNNNN or \u{hhhh}
             if (next_ch == 'u') {
-                    if (self.position + 4 < self.input.len and
+                if (self.position + 1 < self.input.len and self.input[self.position + 1] == '{') {
+                    // \u{hhhh} format
+                    var hex_end = self.position + 2;
+                    while (hex_end < self.input.len and std.ascii.isHex(self.input[hex_end])) {
+                        hex_end += 1;
+                    }
+                    if (hex_end < self.input.len and self.input[hex_end] == '}' and hex_end > self.position + 2) {
+                        self.position = hex_end + 1;
+                        return .{
+                            .type = .Literal,
+                            .value = self.input[start_pos..self.position],
+                            .position = start_pos,
+                        };
+                    }
+                    return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                }
+                if (self.position + 4 < self.input.len and
                     std.ascii.isHex(self.input[self.position + 1]) and
                     std.ascii.isHex(self.input[self.position + 2]) and
                     std.ascii.isHex(self.input[self.position + 3]) and

@@ -1941,7 +1941,8 @@ pub const Vm = struct {
                     var sub_advance_len: usize = 1;
                     const sub_has_ranges = inst.char_class.?.*.ranges.items.len > 0;
                     const sub_has_posix = inst.char_class.?.*.posix_classes.items.len > 0;
-                    const sub_has_unicode = inst.char_class.?.*.unicode_properties.items.len > 0;
+                    const sub_has_unicode_props = inst.char_class.?.*.unicode_properties.items.len > 0;
+                    const sub_has_unicode_ranges = inst.char_class.?.*.unicode_ranges.items.len > 0;
 
                     if (ch2 < 128 and (sub_has_ranges or sub_has_posix)) {
                         const range_match2 = inst.char_class.?.*.contains(ch2);
@@ -1949,7 +1950,24 @@ pub const Vm = struct {
                         sub_matches = range_match2 or posix_match2;
                     }
 
-                    if (!sub_matches and sub_has_unicode) {
+                    if (!sub_matches and sub_has_unicode_ranges) {
+                        if (ch2 < 128) {
+                            if (inst.char_class.?.*.containsUnicodeRange(ch2)) {
+                                sub_matches = true;
+                            }
+                        } else {
+                            const byte_len = std.unicode.utf8ByteSequenceLength(input[sub_pos]) catch 1;
+                            if (sub_pos + byte_len <= input.len) {
+                                const cp = std.unicode.utf8Decode(input[sub_pos..sub_pos + byte_len]) catch input[sub_pos];
+                                if (inst.char_class.?.*.containsUnicodeRange(cp)) {
+                                    sub_matches = true;
+                                    sub_advance_len = byte_len;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!sub_matches and sub_has_unicode_props) {
                         if (matchUnicodePropertyInClass(input, sub_pos, inst.char_class.?.*)) |byte_len| {
                             sub_matches = true;
                             sub_advance_len = byte_len;
@@ -2569,7 +2587,8 @@ pub const Vm = struct {
                     var advance_len: usize = 1;
                     const has_ranges = inst.char_class.?.*.ranges.items.len > 0;
                     const has_posix = inst.char_class.?.*.posix_classes.items.len > 0;
-                    const has_unicode = inst.char_class.?.*.unicode_properties.items.len > 0;
+                    const has_unicode_props = inst.char_class.?.*.unicode_properties.items.len > 0;
+                    const has_unicode_ranges = inst.char_class.?.*.unicode_ranges.items.len > 0;
 
                     // Check ranges and POSIX classes (ASCII single-byte)
                     if (ch < 128 and (has_ranges or has_posix)) {
@@ -2588,8 +2607,26 @@ pub const Vm = struct {
                         matches = range_match or posix_match;
                     }
 
+                    // Check Unicode ranges (both ASCII and non-ASCII)
+                    if (!matches and has_unicode_ranges) {
+                        if (ch < 128) {
+                            if (inst.char_class.?.*.containsUnicodeRange(ch)) {
+                                matches = true;
+                            }
+                        } else {
+                            const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch 1;
+                            if (pos + byte_len <= input.len) {
+                                const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch input[pos];
+                                if (inst.char_class.?.*.containsUnicodeRange(cp)) {
+                                    matches = true;
+                                    advance_len = byte_len;
+                                }
+                            }
+                        }
+                    }
+
                     // Check Unicode properties (handles both ASCII and non-ASCII)
-                    if (!matches and has_unicode) {
+                    if (!matches and has_unicode_props) {
                         if (matchUnicodePropertyInClass(input, pos, inst.char_class.?.*)) |byte_len| {
                             matches = true;
                             advance_len = byte_len;

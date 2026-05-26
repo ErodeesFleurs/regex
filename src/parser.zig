@@ -92,12 +92,18 @@ pub const CharClass = struct {
         end: u8,
     };
 
+    pub const UnicodeRange = struct {
+        start: u21,
+        end: u21,
+    };
+
     pub const UnicodePropEntry = struct {
         name: []const u8,
         negated: bool,
     };
 
     ranges: std.ArrayList(CharRange),
+    unicode_ranges: std.ArrayList(UnicodeRange),
     posix_classes: std.ArrayList([]const u8),
     unicode_properties: std.ArrayList(UnicodePropEntry),
     negated: bool,
@@ -106,6 +112,7 @@ pub const CharClass = struct {
     pub fn init(allocator: std.mem.Allocator, negated: bool) CharClass {
         return .{
             .ranges = .empty,
+            .unicode_ranges = .empty,
             .posix_classes = .empty,
             .unicode_properties = .empty,
             .negated = negated,
@@ -123,11 +130,16 @@ pub const CharClass = struct {
             self.allocator.free(entry.name);
         }
         self.unicode_properties.deinit(self.allocator);
+        self.unicode_ranges.deinit(self.allocator);
         self.ranges.deinit(self.allocator);
     }
 
     pub fn addRange(self: *CharClass, start: u8, end: u8) !void {
         try self.ranges.append(self.allocator, .{ .start = start, .end = end });
+    }
+
+    pub fn addUnicodeRange(self: *CharClass, start: u21, end: u21) !void {
+        try self.unicode_ranges.append(self.allocator, .{ .start = start, .end = end });
     }
 
     pub fn addPosixClass(self: *CharClass, name: []const u8) !void {
@@ -143,6 +155,15 @@ pub const CharClass = struct {
     pub fn contains(self: CharClass, ch: u8) bool {
         for (self.ranges.items) |range| {
             if (ch >= range.start and ch <= range.end) {
+                return !self.negated;
+            }
+        }
+        return self.negated;
+    }
+
+    pub fn containsUnicodeRange(self: CharClass, cp: u21) bool {
+        for (self.unicode_ranges.items) |range| {
+            if (cp >= range.start and cp <= range.end) {
                 return !self.negated;
             }
         }
@@ -944,24 +965,8 @@ pub const Parser = struct {
                 }
             }
 
-            var start: u8 = undefined;
-            if (t.value.len >= 2 and t.value[0] == '\\') {
-                start = switch (t.value[1]) {
-                't' => '\t',
-                        'n' => '\n',
-                        'r' => '\r',
-                        'a' => '\x07',
-                        'e' => '\x1B',
-                        'f' => '\x0C',
-                        'v' => '\x0B',
-                        '\\' => '\\',
-                    'x' => std.fmt.parseInt(u8, t.value[2..], 16) catch t.value[1],
-                    'u' => @truncate(std.fmt.parseInt(u16, t.value[2..], 16) catch t.value[1]),
-                    else => t.value[1],
-                };
-            } else {
-                start = t.value[0];
-            }
+            // Parse character value (supports ASCII and Unicode)
+            const start_info = try self.parseClassCharValue(t.value);
 
             // Check if it's a range (a-z)
             const next = self.tokenizer.peek();
@@ -971,30 +976,29 @@ pub const Parser = struct {
                 const end_token = self.tokenizer.peek();
                 if (end_token.type == .EOF or end_token.type == .RBracket) {
                     // '-' at the end, treat as literal
-                    try cc.addRange(start, start);
+                    if (start_info.unicode) {
+                        try cc.addUnicodeRange(start_info.cp, start_info.cp);
+                    } else {
+                        try cc.addRange(@intCast(start_info.cp), @intCast(start_info.cp));
+                    }
                     try cc.addRange('-', '-');
                     continue;
                 }
 
                 _ = self.tokenizer.nextToken();
-                var end: u8 = undefined;
-                if (end_token.value.len >= 2 and end_token.value[0] == '\\') {
-                    end = switch (end_token.value[1]) {
-                        't' => '\t',
-                        'n' => '\n',
-                        'r' => '\r',
-                        '\\' => '\\',
-                        'x' => std.fmt.parseInt(u8, end_token.value[2..], 16) catch end_token.value[1],
-                        'u' => @truncate(std.fmt.parseInt(u16, end_token.value[2..], 16) catch end_token.value[1]),
-                        else => end_token.value[1],
-                    };
-                } else {
-                    end = end_token.value[0];
-                }
+                const end_info = try self.parseClassCharValue(end_token.value);
 
-                try cc.addRange(start, end);
+                if (start_info.unicode or end_info.unicode) {
+                    try cc.addUnicodeRange(start_info.cp, end_info.cp);
+                } else {
+                    try cc.addRange(@intCast(start_info.cp), @intCast(end_info.cp));
+                }
             } else {
-                try cc.addRange(start, start);
+                if (start_info.unicode) {
+                    try cc.addUnicodeRange(start_info.cp, start_info.cp);
+                } else {
+                    try cc.addRange(@intCast(start_info.cp), @intCast(start_info.cp));
+                }
             }
         }
 
@@ -1008,6 +1012,72 @@ pub const Parser = struct {
             .group_index = null,
         };
         return node;
+    }
+
+    const ClassCharInfo = struct {
+        cp: u21,
+        unicode: bool,
+    };
+
+    fn parseClassCharValue(self: *Parser, value: []const u8) ParserError!ClassCharInfo {
+        if (value.len >= 2 and value[0] == '\\') {
+            switch (value[1]) {
+                't' => return .{ .cp = '\t', .unicode = false },
+                'n' => return .{ .cp = '\n', .unicode = false },
+                'r' => return .{ .cp = '\r', .unicode = false },
+                'a' => return .{ .cp = '\x07', .unicode = false },
+                'e' => return .{ .cp = '\x1B', .unicode = false },
+                'f' => return .{ .cp = '\x0C', .unicode = false },
+                'v' => return .{ .cp = '\x0B', .unicode = false },
+                '\\' => return .{ .cp = '\\', .unicode = false },
+                'x' => {
+                    if (value.len >= 4 and value[2] == '{') {
+                        // \x{hhhh}
+                        const hex = value[3 .. value.len - 1];
+                        const cp = std.fmt.parseInt(u21, hex, 16) catch {
+                            self.setError("Invalid hex escape", 0);
+                            return error.InvalidEscapeSequence;
+                        };
+                        return .{ .cp = cp, .unicode = cp > 255 };
+                    } else {
+                        // \xNN
+                        const cp = std.fmt.parseInt(u8, value[2..], 16) catch {
+                            self.setError("Invalid hex escape", 0);
+                            return error.InvalidEscapeSequence;
+                        };
+                        return .{ .cp = cp, .unicode = false };
+                    }
+                },
+                'u' => {
+                    if (value.len >= 4 and value[2] == '{') {
+                        // \u{hhhh}
+                        const hex = value[3 .. value.len - 1];
+                        const cp = std.fmt.parseInt(u21, hex, 16) catch {
+                            self.setError("Invalid Unicode escape", 0);
+                            return error.InvalidEscapeSequence;
+                        };
+                        return .{ .cp = cp, .unicode = true };
+                    } else {
+                        // \uNNNN
+                        const cp = std.fmt.parseInt(u21, value[2..], 16) catch {
+                            self.setError("Invalid Unicode escape", 0);
+                            return error.InvalidEscapeSequence;
+                        };
+                        return .{ .cp = cp, .unicode = cp > 255 };
+                    }
+                },
+                else => return .{ .cp = value[1], .unicode = false },
+            }
+        } else if (value.len == 1) {
+            return .{ .cp = value[0], .unicode = false };
+        } else {
+            // Multi-byte UTF-8 character
+            const cp = std.unicode.utf8Decode(value) catch {
+                self.setError("Invalid UTF-8 in character class", 0);
+                return error.InvalidEscapeSequence;
+            };
+            return .{ .cp = cp, .unicode = true };
+        }
     }
 
     fn parseGroup(self: *Parser) ParserError!?*AstNode {
@@ -1494,6 +1564,7 @@ pub const ParserError = error{
     InvalidQuantifier,
     InvalidCharacter,
     InvalidBackref,
+    InvalidEscapeSequence,
     Overflow,
     OutOfMemory,
 };
