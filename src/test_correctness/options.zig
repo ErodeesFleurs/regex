@@ -117,3 +117,58 @@ test "options: unicode case insensitive backref" {
     try std.testing.expect(try re.isMatch("caféCAFÉ"));
     try std.testing.expect(try re.isMatch("CAFÉcafé"));
 }
+
+test "options: global inline flag (?i)" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(?i)hello");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("hello"));
+    try std.testing.expect(try re.isMatch("HELLO"));
+    try std.testing.expect(try re.isMatch("HeLLo"));
+}
+
+test "options: global inline flag (?m)" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(?m)^hello$");
+    defer re.deinit();
+    try std.testing.expect(!try re.isMatch("x\nhello\ny"));
+    var result = try re.find("x\nhello\ny");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "options: global inline flag (?s)" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(?s)a.b");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("a\nb"));
+}
+
+test "options: scoped inline flag (?i:) restores" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(?i:hello)WORLD");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("helloWORLD"));
+    try std.testing.expect(try re.isMatch("HELLOWORLD"));
+    try std.testing.expect(!try re.isMatch("helloworld"));
+}
+
+test "options: combined global inline flag (?im)" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compile(allocator, "(?im)^hello$");
+    defer re.deinit();
+    try std.testing.expect(!try re.isMatch("x\nhello\ny"));
+    var result = try re.find("x\nhello\ny");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+    } else {
+        try std.testing.expect(false);
+    }
+    try std.testing.expect(try re.isMatch("HELLO"));
+    try std.testing.expect(try re.isMatch("hello"));
+}

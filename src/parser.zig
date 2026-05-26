@@ -1194,41 +1194,78 @@ pub const Parser = struct {
                         return error.UnexpectedToken;
                     },
                     'i', 'm', 's' => {
-                        // Inline flag (?i:...), (?m:...), (?s:...)
+                        // Inline flag (?i:...), (?m:...), (?s:...) or global (?i), (?m), (?s)
                         var opts = RegexOptions{};
+                        var flag_bits: usize = 0;
+
+                        // Process the first flag character (already in `special`)
                         switch (special.value[0]) {
-                            'i' => opts.case_sensitive = false,
-                            'm' => opts.multiline = true,
-                            's' => opts.dot_matches_newline = true,
+                            'i' => { opts.case_sensitive = false; flag_bits |= 1; },
+                            'm' => { opts.multiline = true; flag_bits |= 2; },
+                            's' => { opts.dot_matches_newline = true; flag_bits |= 4; },
                             else => unreachable,
                         }
-                        // expect ':'
-                        const colon = self.tokenizer.peek();
-                        if (colon.type == .Literal and colon.value.len == 1 and colon.value[0] == ':') {
+
+                        // Process additional flag characters (e.g. (?im))
+                        while (true) {
+                            const next_flag = self.tokenizer.peek();
+                            if (next_flag.type == .Literal and next_flag.value.len == 1) {
+                                const ch = next_flag.value[0];
+                                if (ch == 'i' or ch == 'm' or ch == 's') {
+                                    _ = self.tokenizer.nextToken();
+                                    switch (ch) {
+                                        'i' => { opts.case_sensitive = false; flag_bits |= 1; },
+                                        'm' => { opts.multiline = true; flag_bits |= 2; },
+                                        's' => { opts.dot_matches_newline = true; flag_bits |= 4; },
+                                        else => unreachable,
+                                    }
+                                    continue;
+                                }
+                            }
+                            break;
+                        }
+
+                        const next = self.tokenizer.peek();
+                        if (next.type == .Literal and next.value.len == 1 and next.value[0] == ':') {
+                            // Scoped flag (?i:...)
                             _ = self.tokenizer.nextToken(); // consume ':'
+                            const inner = try self.parseExpression() orelse {
+                                self.setErrorAtToken("Empty group", self.tokenizer.peek());
+                                return error.EmptyGroup;
+                            };
+                            _ = self.tokenizer.expect(.RParen) catch {
+                                self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+                                return error.UnexpectedToken;
+                            };
+                            const node = try self.allocator.create(AstNode);
+                            node.* = .{
+                                .type = .InlineFlag,
+                                .value = flag_bits,
+                                .left = inner,
+                                .right = null,
+                                .char_class = null,
+                                .group_index = null,
+                                .options = opts,
+                            };
+                            return node;
+                        } else if (next.type == .RParen) {
+                            // Global flag (?i)
+                            _ = self.tokenizer.nextToken(); // consume ')'
+                            const node = try self.allocator.create(AstNode);
+                            node.* = .{
+                                .type = .InlineFlag,
+                                .value = flag_bits,
+                                .left = null,
+                                .right = null,
+                                .char_class = null,
+                                .group_index = null,
+                                .options = opts,
+                            };
+                            return node;
                         } else {
-                            self.setErrorAtToken("Unexpected token: expected ':'", colon);
+                            self.setErrorAtToken("Unexpected token: expected ':' or ')'", next);
                             return error.UnexpectedToken;
                         }
-                        const inner = try self.parseExpression() orelse {
-                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                            return error.EmptyGroup;
-                        };
-                        _ = self.tokenizer.expect(.RParen) catch {
-                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                            return error.UnexpectedToken;
-                        };
-                        const node = try self.allocator.create(AstNode);
-                        node.* = .{
-                            .type = .InlineFlag,
-                            .value = null,
-                            .left = inner,
-                            .right = null,
-                            .char_class = null,
-                            .group_index = null,
-                            .options = opts,
-                        };
-                        return node;
                     },
                     '>' => {
                         // Atomic group (?>...)

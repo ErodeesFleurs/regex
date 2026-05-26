@@ -363,11 +363,27 @@ pub const Compiler = struct {
                 _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
             },
             .InlineFlag => {
+                const old_options = self.options;
+                var new_opts = old_options;
+                if (node.value) |flag_bits| {
+                    if (flag_bits & 1 != 0) new_opts.case_sensitive = node.options.?.case_sensitive;
+                    if (flag_bits & 2 != 0) new_opts.multiline = node.options.?.multiline;
+                    if (flag_bits & 4 != 0) new_opts.dot_matches_newline = node.options.?.dot_matches_newline;
+                }
+                self.options = new_opts;
                 _ = try self.bytecode.emit(.{
                     .opcode = .SetOption,
-                    .options = node.options,
+                    .options = new_opts,
                 });
-                try self.compileNode(node.left.?);
+                if (node.left) |inner| {
+                    try self.compileNode(inner);
+                    // Restore original options for scoped flag
+                    self.options = old_options;
+                    _ = try self.bytecode.emit(.{
+                        .opcode = .SetOption,
+                        .options = old_options,
+                    });
+                }
             },
             .AtomicGroup => {
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
