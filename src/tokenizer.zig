@@ -21,6 +21,7 @@ pub const TokenType = enum {
     AssertStringStart,       // \A
     AssertStringEnd,         // \z
     AssertStringEndAllowNewline, // \Z
+    AssertMatchStart,        // \G
     
     // Escape sequences
     Backslash,     // \
@@ -345,6 +346,7 @@ pub const Tokenizer = struct {
                 'A' => .AssertStringStart,
                 'z' => .AssertStringEnd,
                 'Z' => .AssertStringEndAllowNewline,
+                'G' => .AssertMatchStart,
                 't', 'n', 'r', 'a', 'e', 'f', 'v', '0', 'c' => .Literal,
                 '\\' => .Literal,
                 '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => .Literal,

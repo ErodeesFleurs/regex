@@ -87,15 +87,23 @@ pub const Regex = struct {
     }
     
     pub fn exec(self: *Regex, text: []const u8, start_pos: usize) !MatchResult {
+        self.vm.last_match_end = start_pos;
         return try self.vm.exec(text, start_pos);
     }
 
     pub fn isMatch(self: *Regex, text: []const u8) !bool {
+        self.vm.last_match_end = 0;
         return try self.vm.match(text);
     }
 
     pub fn find(self: *Regex, text: []const u8) !?MatchResult {
-        return try self.vm.find(text);
+        const result = try self.vm.find(text);
+        if (result) |*r| {
+            if (r.matched) {
+                self.vm.last_match_end = r.end;
+            }
+        }
+        return result;
     }
     
     pub fn findAll(self: *Regex, text: []const u8) !std.ArrayList(MatchResult) {
@@ -385,6 +393,7 @@ pub const MatchIterator = struct {
         while (self.pos <= self.text.len) {
             var result = try self.regex.vm.exec(self.text, self.pos);
             if (result.matched) {
+                self.regex.vm.last_match_end = result.end;
                 if (result.start == result.end) {
                     self.pos += 1;
                 } else {

@@ -24,6 +24,7 @@ pub const OpCode = enum(u8) {
     AssertStringStart,       // \A
     AssertStringEnd,         // \z
     AssertStringEndAllowNewline, // \Z
+    AssertMatchStart,        // \G
     AssertForward,
     AssertForwardEnd,
     AssertForwardNegative,
@@ -84,6 +85,7 @@ pub const Instruction = struct {
             .AssertStringStart => try writer.print("AssertStringStart", .{}),
             .AssertStringEnd => try writer.print("AssertStringEnd", .{}),
             .AssertStringEndAllowNewline => try writer.print("AssertStringEndAllowNewline", .{}),
+            .AssertMatchStart => try writer.print("AssertMatchStart", .{}),
             .AssertForward => try writer.print("AssertForward", .{}),
             .AssertForwardEnd => try writer.print("AssertForwardEnd", .{}),
             .AssertForwardNegative => try writer.print("AssertForwardNegative", .{}),

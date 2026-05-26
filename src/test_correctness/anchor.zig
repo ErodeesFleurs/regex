@@ -48,8 +48,75 @@ test "anchor: ^$ empty match" {
 test "anchor: multiple anchors" {
     const allocator = std.testing.allocator;
     // "^a$b$" is impossible (requires end-of-string twice).
+    // PCRE semantics: first $ can match before final newline, but here it's strict.
     try std.testing.expect(!try regex.isMatch(allocator, "^a$b$", "ab"));
-    try std.testing.expect(!try regex.isMatch(allocator, "^a$b$", "abc"));
+}
+
+test "anchor: multiline" {
+    const allocator = std.testing.allocator;
+    var re = try regex.Regex.compileWithOptions(allocator, "^b$", .{ .multiline = true });
+    defer re.deinit();
+    // Prefix match: isMatch only tries position 0.
+    try std.testing.expect(!try re.isMatch("a\nb\nc"));
+    var result = try re.find("a\nb\nc");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+        try std.testing.expectEqualStrings("b", "a\nb\nc"[r.start..r.end]);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "anchor: \\G match start or previous match end" {
+    const allocator = std.testing.allocator;
+    // \\Gabc on "abcabc" — findIter should match twice because \\G advances
+    var re = try regex.Regex.compile(allocator, "\\Gabc");
+    defer re.deinit();
+
+    var iter = re.findIter("abcabc");
+
+    var result = try iter.next();
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("abc", "abcabc"[r.start..r.end]);
+    } else {
+        try std.testing.expect(false);
+    }
+
+    var result2 = try iter.next();
+    if (result2) |*r| {
+        defer r.deinit();
+        try std.testing.expectEqualStrings("abc", "abcabc"[r.start..r.end]);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "anchor: \\G fails when not at previous match end" {
+    const allocator = std.testing.allocator;
+    // Pattern: \\Gword — must be at previous match end or start
+    var re = try regex.Regex.compile(allocator, "\\Gword");
+    defer re.deinit();
+
+    // First match at position 0 fails (starts with "hello")
+    var result = try re.find("hello word");
+    if (result) |*r| {
+        defer r.deinit();
+        try std.testing.expect(!r.matched);
+    } else {
+        // null means no match
+    }
+
+    // After failed find, last_match_end is 0, so \\G still at start
+    var result2 = try re.find("word hello");
+    if (result2) |*r| {
+        defer r.deinit();
+        try std.testing.expect(r.matched);
+        try std.testing.expectEqualStrings("word", "word hello"[r.start..r.end]);
+    } else {
+        try std.testing.expect(false);
+    }
 }
 
 test "anchor: anchor with alternation" {

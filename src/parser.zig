@@ -28,6 +28,7 @@ pub const NodeType = enum {
     AssertStringStart,       // \A
     AssertStringEnd,         // \z
     AssertStringEndAllowNewline, // \Z
+    AssertMatchStart,        // \G
     AssertForward,      // positive lookahead (?=...)
     AssertForwardNegative, // negative lookahead (?!...)
     AssertBackward,     // positive lookbehind (?<=...)
@@ -789,6 +790,19 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
                     .type = .AssertStringEndAllowNewline,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .AssertMatchStart => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .AssertMatchStart,
                     .value = null,
                     .left = null,
                     .right = null,

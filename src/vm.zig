@@ -1794,6 +1794,7 @@ pub const Vm = struct {
     allocator: std.mem.Allocator,
     options: RegexOptions,
     atomic_stack: std.ArrayList(usize) = .empty,
+    last_match_end: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, bytecode: Bytecode, options: RegexOptions) Vm {
         return .{
@@ -1801,6 +1802,7 @@ pub const Vm = struct {
             .allocator = allocator,
             .options = options,
             .atomic_stack = .empty,
+            .last_match_end = 0,
         };
     }
 
@@ -2095,6 +2097,19 @@ pub const Vm = struct {
                 },
                 .AssertStringEndAllowNewline => {
                     if (sub_pos == input.len or (sub_pos + 1 == input.len and input[sub_pos] == '\n')) {
+                        sub_pc += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertMatchStart => {
+                    if (sub_pos == self.last_match_end) {
                         sub_pc += 1;
                     } else {
                         if (sub_stack.items.len == 0) break;
@@ -2855,6 +2870,20 @@ pub const Vm = struct {
                 },
                 .AssertStringEndAllowNewline => {
                     if (pos == input.len or (pos + 1 == input.len and input[pos] == '\n')) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        self.options = frame.options;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .AssertMatchStart => {
+                    if (pos == self.last_match_end) {
                         pc += 1;
                     } else {
                         if (stack.items.len == 0) break;

@@ -350,6 +350,9 @@ pub const Compiler = struct {
             .AssertStringEndAllowNewline => {
                 _ = try self.bytecode.emit(.{ .opcode = .AssertStringEndAllowNewline });
             },
+            .AssertMatchStart => {
+                _ = try self.bytecode.emit(.{ .opcode = .AssertMatchStart });
+            },
             .AssertForward => {
                 // Positive lookahead: compile inner expression with special markers
                 // Actual implementation needs VM support
