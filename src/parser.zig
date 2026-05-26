@@ -56,6 +56,7 @@ pub const AstNode = struct {
     char_class_transferred: bool = false, // whether char_class has been transferred to bytecode
     unicode_property: ?[]const u8 = null, // for UnicodeProperty
     unicode_negated: bool = false, // for UnicodeProperty
+    condition: ?*AstNode = null, // for Conditional (lookahead/lookbehind condition)
 
     pub fn deinit(self: *AstNode, allocator: std.mem.Allocator) void {
         if (self.group_name) |name| {
@@ -63,6 +64,10 @@ pub const AstNode = struct {
         }
         if (self.unicode_property) |prop| {
             allocator.free(prop);
+        }
+        if (self.condition) |cond| {
+            cond.deinit(allocator);
+            allocator.destroy(cond);
         }
         if (self.left) |left| {
             left.deinit(allocator);
@@ -1003,36 +1008,98 @@ pub const Parser = struct {
             // Conditional: (?(...)...)
             if (special.type == .LParen) {
                 _ = self.tokenizer.nextToken(); // consume '('
-                const cond_token = self.tokenizer.nextToken();
-                var group_idx: usize = 0;
-                var has_condition = false;
+                const cond_token = self.tokenizer.peek();
 
-                if (cond_token.type == .Literal and cond_token.value.len >= 1) {
-                    // Try to parse as number
-                    if (std.fmt.parseInt(usize, cond_token.value, 10)) |n| {
-                        group_idx = n;
-                        has_condition = true;
-                    } else |_| {
-                        // Could be named group: (?(<name>)...)
-                        // For now, only support numeric
-                        self.setErrorAtToken("Expected capture group number", cond_token);
-                        return error.UnexpectedToken;
-                    }
-                } else if (cond_token.type == .Backref and cond_token.value.len >= 2) {
-                    // Backref token like \1
-                    if (std.fmt.parseInt(usize, cond_token.value[1..], 10)) |n| {
-                        group_idx = n;
-                        has_condition = true;
-                    } else |_| {
-                        self.setErrorAtToken("Expected capture group number", cond_token);
-                        return error.UnexpectedToken;
+                var cond_node: ?*AstNode = null;
+                var group_idx: usize = 0;
+                var is_group_condition = false;
+
+                // Check for lookahead/lookbehind condition: (?=...), (?!...), (?<=...), (?<!...)
+                if (cond_token.type == .Question) {
+                    _ = self.tokenizer.nextToken(); // consume '?'
+                    const look_token = self.tokenizer.peek();
+                    if (look_token.type == .Literal and look_token.value.len == 1) {
+                        const look_ch = look_token.value[0];
+                        if (look_ch == '=' or look_ch == '!') {
+                            _ = self.tokenizer.nextToken(); // consume '=' or '!'
+                            const inner = try self.parseExpression() orelse {
+                                self.setErrorAtToken("Empty lookahead condition", self.tokenizer.peek());
+                                return error.EmptyGroup;
+                            };
+                            _ = self.tokenizer.expect(.RParen) catch {
+                                self.setErrorAtToken("Unclosed lookahead condition", self.tokenizer.peek());
+                                return error.UnexpectedToken;
+                            };
+                            const assert_node = try self.allocator.create(AstNode);
+                            assert_node.* = .{
+                                .type = if (look_ch == '=') .AssertForward else .AssertForwardNegative,
+                                .value = null,
+                                .left = inner,
+                                .right = null,
+                                .char_class = null,
+                                .group_index = null,
+                            };
+                            cond_node = assert_node;
+                        } else if (look_ch == '<') {
+                            _ = self.tokenizer.nextToken(); // consume '<'
+                            const next_after_lt = self.tokenizer.peek();
+                            if (next_after_lt.type == .Literal and next_after_lt.value.len == 1) {
+                                const lt_ch = next_after_lt.value[0];
+                                if (lt_ch == '=' or lt_ch == '!') {
+                                    _ = self.tokenizer.nextToken(); // consume '=' or '!'
+                                    const inner = try self.parseExpression() orelse {
+                                        self.setErrorAtToken("Empty lookbehind condition", self.tokenizer.peek());
+                                        return error.EmptyGroup;
+                                    };
+                                    _ = self.tokenizer.expect(.RParen) catch {
+                                        self.setErrorAtToken("Unclosed lookbehind condition", self.tokenizer.peek());
+                                        return error.UnexpectedToken;
+                                    };
+                                    const assert_node = try self.allocator.create(AstNode);
+                                    assert_node.* = .{
+                                        .type = if (lt_ch == '=') .AssertBackward else .AssertBackwardNegative,
+                                        .value = null,
+                                        .left = inner,
+                                        .right = null,
+                                        .char_class = null,
+                                        .group_index = null,
+                                    };
+                                    cond_node = assert_node;
+                                }
+                            }
+                        }
                     }
                 }
 
-                _ = self.tokenizer.expect(.RParen) catch {
-                    self.setErrorAtToken("Unclosed condition", self.tokenizer.peek());
-                    return error.UnexpectedToken;
-                };
+                // If not a lookahead/lookbehind, try numeric group condition
+                if (cond_node == null) {
+                    const num_token = self.tokenizer.nextToken();
+                    if (num_token.type == .Literal and num_token.value.len >= 1) {
+                        if (std.fmt.parseInt(usize, num_token.value, 10)) |n| {
+                            group_idx = n;
+                            is_group_condition = true;
+                        } else |_| {
+                            self.setErrorAtToken("Expected capture group number or lookahead/lookbehind", num_token);
+                            return error.UnexpectedToken;
+                        }
+                    } else if (num_token.type == .Backref and num_token.value.len >= 2) {
+                        if (std.fmt.parseInt(usize, num_token.value[1..], 10)) |n| {
+                            group_idx = n;
+                            is_group_condition = true;
+                        } else |_| {
+                            self.setErrorAtToken("Expected capture group number", num_token);
+                            return error.UnexpectedToken;
+                        }
+                    } else {
+                        self.setErrorAtToken("Expected capture group number or lookahead/lookbehind", num_token);
+                        return error.UnexpectedToken;
+                    }
+
+                    _ = self.tokenizer.expect(.RParen) catch {
+                        self.setErrorAtToken("Unclosed condition", self.tokenizer.peek());
+                        return error.UnexpectedToken;
+                    };
+                }
 
                 const yes_branch = try self.parseExpression() orelse {
                     self.setErrorAtToken("Empty conditional branch", self.tokenizer.peek());
@@ -1057,11 +1124,12 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
                     .type = .Conditional,
-                    .value = group_idx,
+                    .value = if (is_group_condition) group_idx else null,
                     .left = yes_branch,
                     .right = no_branch,
                     .char_class = null,
                     .group_index = null,
+                    .condition = cond_node,
                 };
                 return node;
             }

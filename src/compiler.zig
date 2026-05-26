@@ -80,10 +80,23 @@ pub const Compiler = struct {
                 _ = try self.bytecode.emit(.{ .opcode = .Any });
             },
             .CharClass => {
-                // Allocate CharClass on the heap
                 const cc = try self.allocator.create(CharClass);
-                cc.* = node.char_class.?;
-                node.char_class_transferred = true;
+                if (node.char_class_transferred) {
+                    // Deep copy for additional uses (e.g. quantifier repetition)
+                    cc.* = CharClass.init(self.allocator, node.char_class.?.negated);
+                    for (node.char_class.?.ranges.items) |range| {
+                        try cc.addRange(range.start, range.end);
+                    }
+                    for (node.char_class.?.posix_classes.items) |name| {
+                        try cc.addPosixClass(name);
+                    }
+                    for (node.char_class.?.unicode_properties.items) |entry| {
+                        try cc.addUnicodeProperty(entry.name, entry.negated);
+                    }
+                } else {
+                    cc.* = node.char_class.?;
+                    node.char_class_transferred = true;
+                }
                 _ = try self.bytecode.emit(.{
                     .opcode = .CharClass,
                     .char_class = cc,
@@ -392,48 +405,120 @@ pub const Compiler = struct {
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
             },
             .Conditional => {
-                // (?(n)yes|no)
-                const group_idx = node.value.?;
-                const cond_idx = try self.bytecode.emit(.{
-                    .opcode = .Conditional,
-                    .backref_group = group_idx,
-                    .target = undefined,
-                });
+                if (node.condition) |cond| {
+                    // Lookahead/lookbehind condition: (?(?=cond)yes|no) or (?(?<=cond)yes|no)
+                    // Compile as:
+                    //   Split L_yes, L_no
+                    //   L_yes:
+                    //       AtomicStart
+                    //       AssertForward[Negative] / AssertBackward[Negative]
+                    //       ...cond...
+                    //       AssertForward[Negative]End / AssertBackward[Negative]End
+                    //       ...yes...
+                    //       AtomicEnd
+                    //       Jmp L_end
+                    //   L_no:
+                    //       ...no...
+                    //   L_end:
+                    const cond_type = cond.type;
+                    var yes_node = node.left.?;
+                    var no_node = node.right;
 
-                const yes_node = node.left.?;
-                const no_node = node.right;
+                    // If yes is Alternate and no is null, parser included | in yes
+                    // Use left/right of Alternate as yes/no branches
+                    if (yes_node.type == .Alternate and no_node == null) {
+                        no_node = yes_node.right;
+                        yes_node = yes_node.left.?;
+                    }
 
-                // If left is Alternate, use its children as yes/no branches
-                if (yes_node.type == .Alternate and no_node == null) {
-                    try self.compileNode(yes_node.left.?);
+                    const split_idx = try self.bytecode.emit(.{
+                        .opcode = .Split,
+                        .target = undefined,
+                    });
+
+                    _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
+                    switch (cond_type) {
+                        .AssertForward => {
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertForward });
+                            try self.compileNode(cond.left.?);
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertForwardEnd });
+                        },
+                        .AssertForwardNegative => {
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertForwardNegative });
+                            try self.compileNode(cond.left.?);
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertForwardEnd });
+                        },
+                        .AssertBackward => {
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackward });
+                            try self.compileNode(cond.left.?);
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
+                        },
+                        .AssertBackwardNegative => {
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardNegative });
+                            try self.compileNode(cond.left.?);
+                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
+                        },
+                        else => unreachable,
+                    }
+                    try self.compileNode(yes_node);
+                    _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
                     const jmp_idx = try self.bytecode.emit(.{
                         .opcode = .Jmp,
                         .target = undefined,
                     });
-                    const no_start = self.bytecode.getPC();
-                    try self.compileNode(yes_node.right.?);
-                    const end_pos = self.bytecode.getPC();
-                    self.bytecode.patch(cond_idx, no_start);
-                    self.bytecode.patch(jmp_idx, end_pos);
-                } else {
-                    // Compile yes branch
-                    try self.compileNode(yes_node);
 
+                    const no_start = self.bytecode.getPC();
                     if (no_node) |no| {
-                        // There is a no branch: yes branch needs to jump over it
+                        try self.compileNode(no);
+                    }
+                    const end_pos = self.bytecode.getPC();
+
+                    self.bytecode.patch(jmp_idx, end_pos);
+                    self.bytecode.instructions.items[split_idx].target = no_start;
+                } else {
+                    // Group number condition: (?(n)yes|no)
+                    const group_idx = node.value.?;
+                    const cond_idx = try self.bytecode.emit(.{
+                        .opcode = .Conditional,
+                        .backref_group = group_idx,
+                        .target = undefined,
+                    });
+
+                    const yes_node = node.left.?;
+                    const no_node = node.right;
+
+                    // If left is Alternate, use its children as yes/no branches
+                    if (yes_node.type == .Alternate and no_node == null) {
+                        try self.compileNode(yes_node.left.?);
                         const jmp_idx = try self.bytecode.emit(.{
                             .opcode = .Jmp,
                             .target = undefined,
                         });
                         const no_start = self.bytecode.getPC();
-                        try self.compileNode(no);
+                        try self.compileNode(yes_node.right.?);
                         const end_pos = self.bytecode.getPC();
                         self.bytecode.patch(cond_idx, no_start);
                         self.bytecode.patch(jmp_idx, end_pos);
                     } else {
-                        // No no-branch: if condition fails, jump past yes branch
-                        const end_pos = self.bytecode.getPC();
-                        self.bytecode.patch(cond_idx, end_pos);
+                        // Compile yes branch
+                        try self.compileNode(yes_node);
+
+                        if (no_node) |no| {
+                            // There is a no branch: yes branch needs to jump over it
+                            const jmp_idx = try self.bytecode.emit(.{
+                                .opcode = .Jmp,
+                                .target = undefined,
+                            });
+                            const no_start = self.bytecode.getPC();
+                            try self.compileNode(no);
+                            const end_pos = self.bytecode.getPC();
+                            self.bytecode.patch(cond_idx, no_start);
+                            self.bytecode.patch(jmp_idx, end_pos);
+                        } else {
+                            // No no-branch: if condition fails, jump past yes branch
+                            const end_pos = self.bytecode.getPC();
+                            self.bytecode.patch(cond_idx, end_pos);
+                        }
                     }
                 }
             },
