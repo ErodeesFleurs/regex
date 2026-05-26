@@ -86,8 +86,14 @@ pub const CharClass = struct {
         end: u8,
     };
 
+    pub const UnicodePropEntry = struct {
+        name: []const u8,
+        negated: bool,
+    };
+
     ranges: std.ArrayList(CharRange),
     posix_classes: std.ArrayList([]const u8),
+    unicode_properties: std.ArrayList(UnicodePropEntry),
     negated: bool,
     allocator: std.mem.Allocator,
 
@@ -95,6 +101,7 @@ pub const CharClass = struct {
         return .{
             .ranges = .empty,
             .posix_classes = .empty,
+            .unicode_properties = .empty,
             .negated = negated,
             .allocator = allocator,
         };
@@ -106,6 +113,10 @@ pub const CharClass = struct {
             self.allocator.free(name);
         }
         self.posix_classes.deinit(self.allocator);
+        for (self.unicode_properties.items) |entry| {
+            self.allocator.free(entry.name);
+        }
+        self.unicode_properties.deinit(self.allocator);
         self.ranges.deinit(self.allocator);
     }
 
@@ -116,6 +127,11 @@ pub const CharClass = struct {
     pub fn addPosixClass(self: *CharClass, name: []const u8) !void {
         const copy = try self.allocator.dupe(u8, name);
         try self.posix_classes.append(self.allocator, copy);
+    }
+
+    pub fn addUnicodeProperty(self: *CharClass, name: []const u8, negated_prop: bool) !void {
+        const copy = try self.allocator.dupe(u8, name);
+        try self.unicode_properties.append(self.allocator, .{ .name = copy, .negated = negated_prop });
     }
 
     pub fn contains(self: CharClass, ch: u8) bool {
@@ -803,6 +819,13 @@ pub const Parser = struct {
             }
 
             _ = self.tokenizer.nextToken();
+
+            // Unicode property inside character class: \p{...} or \P{...}
+            if (t.type == .UnicodeProperty or t.type == .NotUnicodeProperty) {
+                const prop_name = t.value[3..t.value.len - 1]; // skip \p{ and }
+                try cc.addUnicodeProperty(prop_name, t.type == .NotUnicodeProperty);
+                continue;
+            }
 
             // POSIX character class: [:name:]
             const is_lbracket = t.type == .LBracket;

@@ -1727,6 +1727,39 @@ fn isUnicodeWordChar(input: []const u8, pos: usize) bool {
     return isUnicodeProperty(cp, "L") or isUnicodeProperty(cp, "Nd") or isUnicodeProperty(cp, "M");
 }
 
+/// Check if a character at position `pos` matches any Unicode property in the given CharClass.
+/// Returns the byte length of the matched UTF-8 sequence, or null if no match.
+fn matchUnicodePropertyInClass(input: []const u8, pos: usize, cc: @import("parser.zig").CharClass) ?usize {
+    if (pos >= input.len or cc.unicode_properties.items.len == 0) return null;
+
+    const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch 1;
+    const actual_len = if (pos + byte_len > input.len) 1 else byte_len;
+
+    const cp = if (actual_len == 1)
+        @as(u21, input[pos])
+    else
+        std.unicode.utf8Decode(input[pos..pos + actual_len]) catch @as(u21, input[pos]);
+
+    var matches = false;
+    for (cc.unicode_properties.items) |entry| {
+        var prop_match = isUnicodeProperty(cp, entry.name);
+        if (entry.negated) {
+            prop_match = !prop_match;
+        }
+        if (prop_match) {
+            matches = true;
+            break;
+        }
+    }
+
+    if (cc.negated) {
+        matches = !matches;
+    }
+
+    if (matches) return actual_len;
+    return null;
+}
+
 /// Match a single grapheme cluster (simplified implementation).
 /// Returns the total byte length of the cluster, or null if no cluster at pos.
 fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
@@ -1902,11 +1935,28 @@ pub const Vm = struct {
                 },
                 .CharClass => {
                     const ch2 = if (sub_pos < input.len) input[sub_pos] else 0;
-                    const range_match2 = inst.char_class.?.*.contains(ch2);
-                    const posix_match2 = inst.char_class.?.*.containsPosixClass(ch2);
-                    if (sub_pos < input.len and (range_match2 or posix_match2)) {
+                    var sub_matches = false;
+                    var sub_advance_len: usize = 1;
+                    const sub_has_ranges = inst.char_class.?.*.ranges.items.len > 0;
+                    const sub_has_posix = inst.char_class.?.*.posix_classes.items.len > 0;
+                    const sub_has_unicode = inst.char_class.?.*.unicode_properties.items.len > 0;
+
+                    if (ch2 < 128 and (sub_has_ranges or sub_has_posix)) {
+                        const range_match2 = inst.char_class.?.*.contains(ch2);
+                        const posix_match2 = inst.char_class.?.*.containsPosixClass(ch2);
+                        sub_matches = range_match2 or posix_match2;
+                    }
+
+                    if (!sub_matches and sub_has_unicode) {
+                        if (matchUnicodePropertyInClass(input, sub_pos, inst.char_class.?.*)) |byte_len| {
+                            sub_matches = true;
+                            sub_advance_len = byte_len;
+                        }
+                    }
+
+                    if (sub_pos < input.len and sub_matches) {
                         sub_pc += 1;
-                        sub_pos += 1;
+                        sub_pos += sub_advance_len;
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
@@ -2500,22 +2550,40 @@ pub const Vm = struct {
                 },
                 .CharClass => {
                     const ch = if (pos < input.len) input[pos] else 0;
-                    const range_match = if (self.options.case_sensitive)
-                        inst.char_class.?.*.contains(ch)
-                    else
-                        inst.char_class.?.*.contains(ch) or
-                            inst.char_class.?.*.contains(std.ascii.toLower(ch)) or
-                            inst.char_class.?.*.contains(std.ascii.toUpper(ch));
-                    const posix_match = if (self.options.case_sensitive)
-                        inst.char_class.?.*.containsPosixClass(ch)
-                    else
-                        inst.char_class.?.*.containsPosixClass(ch) or
-                            inst.char_class.?.*.containsPosixClass(std.ascii.toLower(ch)) or
-                            inst.char_class.?.*.containsPosixClass(std.ascii.toUpper(ch));
-                    const matches = range_match or posix_match;
+                    var matches = false;
+                    var advance_len: usize = 1;
+                    const has_ranges = inst.char_class.?.*.ranges.items.len > 0;
+                    const has_posix = inst.char_class.?.*.posix_classes.items.len > 0;
+                    const has_unicode = inst.char_class.?.*.unicode_properties.items.len > 0;
+
+                    // Check ranges and POSIX classes (ASCII single-byte)
+                    if (ch < 128 and (has_ranges or has_posix)) {
+                        const range_match = if (self.options.case_sensitive)
+                            inst.char_class.?.*.contains(ch)
+                        else
+                            inst.char_class.?.*.contains(ch) or
+                                inst.char_class.?.*.contains(std.ascii.toLower(ch)) or
+                                inst.char_class.?.*.contains(std.ascii.toUpper(ch));
+                        const posix_match = if (self.options.case_sensitive)
+                            inst.char_class.?.*.containsPosixClass(ch)
+                        else
+                            inst.char_class.?.*.containsPosixClass(ch) or
+                                inst.char_class.?.*.containsPosixClass(std.ascii.toLower(ch)) or
+                                inst.char_class.?.*.containsPosixClass(std.ascii.toUpper(ch));
+                        matches = range_match or posix_match;
+                    }
+
+                    // Check Unicode properties (handles both ASCII and non-ASCII)
+                    if (!matches and has_unicode) {
+                        if (matchUnicodePropertyInClass(input, pos, inst.char_class.?.*)) |byte_len| {
+                            matches = true;
+                            advance_len = byte_len;
+                        }
+                    }
+
                     if (pos < input.len and matches) {
                         pc += 1;
-                        pos += 1;
+                        pos += advance_len;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
