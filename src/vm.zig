@@ -47,6 +47,32 @@ const Frame = struct {
     subroutine_stack_len: usize = 0,
 };
 
+/// Restore execution state from a backtrack frame in the main exec loop.
+inline fn restoreFromFrame(frame: Frame, captures: *std.ArrayList(?usize), pc: *usize, pos: *usize, options: *RegexOptions) void {
+    pc.* = frame.pc;
+    pos.* = frame.pos;
+    options.* = frame.options;
+    if (frame.capture_slot) |slot| {
+        captures.items[slot] = frame.capture_old_value;
+    }
+    if (frame.paired_capture_slot) |slot| {
+        captures.items[slot] = frame.paired_capture_old_value;
+    }
+}
+
+/// Restore execution state from a backtrack frame in tryMatchSubpattern.
+inline fn restoreSubFrame(frame: Frame, captures: *std.ArrayList(?usize), pc: *usize, pos: *usize, subroutine_stack: *std.ArrayList(usize)) void {
+    subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
+    pc.* = frame.pc;
+    pos.* = frame.pos;
+    if (frame.capture_slot) |slot| {
+        captures.items[slot] = frame.capture_old_value;
+    }
+    if (frame.paired_capture_slot) |slot| {
+        captures.items[slot] = frame.paired_capture_old_value;
+    }
+}
+
 fn isUnicodeProperty(cp: u21, property: []const u8) bool {
     // Fast path for ASCII characters
     if (cp < 128) {
@@ -1761,41 +1787,13 @@ fn matchUnicodePropertyInClass(input: []const u8, pos: usize, cc: @import("parse
     return null;
 }
 
-/// Match a single grapheme cluster (simplified implementation).
-/// Returns the total byte length of the cluster, or null if no cluster at pos.
-fn matchNewline(input: []const u8, pos: usize) ?usize {
+/// Check if the character at pos is a line ending character (single char, not CRLF).
+/// Returns byte length (1 or 3), or null.
+fn isLineEndingChar(input: []const u8, pos: usize) ?usize {
     if (pos >= input.len) return null;
 
-    // CRLF sequence
-    if (input[pos] == '\r' and pos + 1 < input.len and input[pos + 1] == '\n') {
-        return 2;
-    }
-
-    // Single-byte line endings
     switch (input[pos]) {
         '\r', '\n', '\x0B', '\x0C', '\x85' => return 1,
-        else => {},
-    }
-
-    // Multi-byte line endings: U+2028 (LS) and U+2029 (PS)
-    if (input[pos] == 0xE2 and pos + 2 < input.len) {
-        if (input[pos + 1] == 0x80) {
-            if (input[pos + 2] == 0xA8 or input[pos + 2] == 0xA9) {
-                return 3;
-            }
-        }
-    }
-
-    return null;
-}
-
-/// Check if the character at pos is a vertical whitespace character.
-/// Returns the byte length of the character (1 or 3), or null if not vertical whitespace.
-fn isVerticalWhitespace(input: []const u8, pos: usize) ?usize {
-    if (pos >= input.len) return null;
-
-    switch (input[pos]) {
-        '\n', '\r', '\x0B', '\x0C', '\x85' => return 1,
         else => {},
     }
 
@@ -1809,6 +1807,25 @@ fn isVerticalWhitespace(input: []const u8, pos: usize) ?usize {
     }
 
     return null;
+}
+
+/// Match a single grapheme cluster (simplified implementation).
+/// Returns the total byte length of the cluster, or null if no cluster at pos.
+fn matchNewline(input: []const u8, pos: usize) ?usize {
+    if (pos >= input.len) return null;
+
+    // CRLF sequence
+    if (input[pos] == '\r' and pos + 1 < input.len and input[pos + 1] == '\n') {
+        return 2;
+    }
+
+    return isLineEndingChar(input, pos);
+}
+
+/// Check if the character at pos is a vertical whitespace character.
+/// Returns the byte length of the character (1 or 3), or null if not vertical whitespace.
+fn isVerticalWhitespace(input: []const u8, pos: usize) ?usize {
+    return isLineEndingChar(input, pos);
 }
 
 fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
@@ -1907,57 +1924,32 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .CharUtf8 => {
                     if (sub_pos >= input.len) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                         continue;
                     }
                     const byte_len = std.unicode.utf8ByteSequenceLength(input[sub_pos]) catch {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                         continue;
                     };
                     if (sub_pos + byte_len > input.len) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                         continue;
                     }
                     const cp = std.unicode.utf8Decode(input[sub_pos..sub_pos + byte_len]) catch {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                         continue;
                     };
                     const expected_cp = inst.char_codepoint.?;
@@ -1971,12 +1963,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .Any => {
@@ -1986,12 +1973,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .CharClass => {
@@ -2039,12 +2021,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .UnicodeProperty => {
@@ -2054,12 +2031,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .GraphemeCluster => {
@@ -2069,12 +2041,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .Newline => {
@@ -2084,12 +2051,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .ResetMatchStart => {
@@ -2103,12 +2065,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .NotVerticalWhitespace => {
@@ -2118,12 +2075,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .Split => {
@@ -2176,12 +2128,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertEnd => {
@@ -2194,12 +2141,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertStringStart => {
@@ -2208,12 +2150,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertStringEnd => {
@@ -2222,12 +2159,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertStringEndAllowNewline => {
@@ -2236,12 +2168,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertMatchStart => {
@@ -2250,12 +2177,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .SetOption => {
@@ -2300,12 +2222,7 @@ pub const Vm = struct {
                     if (start_slot >= sub_captures.items.len or end_slot >= sub_captures.items.len) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                         continue;
                     }
                     const group_start = sub_captures.items[start_slot];
@@ -2313,12 +2230,7 @@ pub const Vm = struct {
                     if (group_start == null or group_end == null) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                         continue;
                     }
                     const group_text = input[group_start.?..group_end.?];
@@ -2333,12 +2245,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .WordBoundary => {
@@ -2349,12 +2256,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .NotWordBoundary => {
@@ -2365,12 +2267,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertForward => {
@@ -2393,12 +2290,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertForwardNegative => {
@@ -2421,12 +2313,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertForwardEnd => {
@@ -2462,12 +2349,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertBackwardNegative => {
@@ -2500,12 +2382,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
-                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                        sub_pc = frame.pc;
-                        sub_pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            sub_captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
                     }
                 },
                 .AssertBackwardEnd => {
@@ -2612,15 +2489,9 @@ pub const Vm = struct {
             if (pc >= self.bytecode.instructions.items.len) {
                 // backtrack
                 if (stack.items.len == 0) break;
-const frame = stack.pop().?;
-                    subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                    self.options = frame.options;
-                pc = frame.pc;
-                pos = frame.pos;
-                self.options = frame.options;
-                if (frame.capture_slot) |slot| {
-                    captures.items[slot] = frame.capture_old_value;
-                }
+                const frame = stack.pop().?;
+                subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
+                restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                 continue;
             }
 
@@ -2639,57 +2510,32 @@ const frame = stack.pop().?;
                         // backtrack
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .CharUtf8 => {
                     if (pos >= input.len) {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                         continue;
                     }
                     const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                         continue;
                     };
                     if (pos + byte_len > input.len) {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                         continue;
                     }
                     const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                         continue;
                     };
                     const expected_cp = inst.char_codepoint.?;
@@ -2703,12 +2549,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .Any => {
@@ -2718,12 +2559,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .CharClass => {
@@ -2784,12 +2620,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .UnicodeProperty => {
@@ -2799,12 +2630,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .GraphemeCluster => {
@@ -2814,12 +2640,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .Newline => {
@@ -2829,12 +2650,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .ResetMatchStart => {
@@ -2849,12 +2665,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .NotVerticalWhitespace => {
@@ -2865,12 +2676,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .Split => {
@@ -2968,12 +2774,7 @@ const frame = stack.pop().?;
                     if (start_slot >= captures.items.len or end_slot >= captures.items.len) {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                         continue;
                     }
                     const group_start = captures.items[start_slot];
@@ -2981,12 +2782,7 @@ const frame = stack.pop().?;
                     if (group_start == null or group_end == null) {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                         continue;
                     }
                     const group_text = input[group_start.?..group_end.?];
@@ -3001,12 +2797,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .WordBoundary => {
@@ -3017,12 +2808,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .NotWordBoundary => {
@@ -3033,12 +2819,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertStart => {
@@ -3051,12 +2832,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertEnd => {
@@ -3069,12 +2845,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertStringStart => {
@@ -3083,12 +2854,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertStringEnd => {
@@ -3097,12 +2863,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertStringEndAllowNewline => {
@@ -3111,12 +2872,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertMatchStart => {
@@ -3125,12 +2881,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertForward => {
@@ -3154,12 +2905,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertForwardNegative => {
@@ -3183,12 +2929,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertForwardEnd => {
@@ -3226,12 +2967,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertBackwardNegative => {
@@ -3266,12 +3002,7 @@ const frame = stack.pop().?;
                     } else {
                         if (stack.items.len == 0) break;
                         const frame = stack.pop().?;
-                        self.options = frame.options;
-                        pc = frame.pc;
-                        pos = frame.pos;
-                        if (frame.capture_slot) |slot| {
-                            captures.items[slot] = frame.capture_old_value;
-                        }
+                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
                     }
                 },
                 .AssertBackwardEnd => {
