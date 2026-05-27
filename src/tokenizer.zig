@@ -33,6 +33,8 @@ pub const TokenType = enum {
     NotWord,       // \W
     Whitespace,    // \s
     NotWhitespace, // \S
+    HorizontalWhitespace,    // \h
+    NotHorizontalWhitespace, // \H
     
     // Word boundaries
     WordBoundary,     // \b
@@ -57,7 +59,19 @@ pub const TokenType = enum {
     
     // Grapheme cluster
     GraphemeCluster,  // \X
-    
+
+    // Newline sequence
+    Newline,          // \R
+
+    // Reset match start
+    ResetMatchStart,  // \K
+
+    // Not newline
+    NotNewline,       // \N
+
+    // Not vertical whitespace
+    NotVerticalWhitespace, // \V
+
     // Other
     EOF,
     Invalid,
@@ -294,7 +308,8 @@ pub const Tokenizer = struct {
                         }
                     }
                 }
-                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                // Not a \N{U+...} escape: treat as \N (not newline)
+                return .{ .type = .NotNewline, .value = self.input[start_pos..self.position], .position = start_pos };
             }
 
             // Unicode property: \p{...} or \P{...}
@@ -372,12 +387,18 @@ pub const Tokenizer = struct {
                 'W' => .NotWord,
                 's' => .Whitespace,
                 'S' => .NotWhitespace,
+                'h' => .HorizontalWhitespace,
+                'H' => .NotHorizontalWhitespace,
                 'b' => .WordBoundary,
                 'B' => .NotWordBoundary,
                 'A' => .AssertStringStart,
                 'z' => .AssertStringEnd,
                 'Z' => .AssertStringEndAllowNewline,
                 'G' => .AssertMatchStart,
+                'R' => .Newline,
+                'K' => .ResetMatchStart,
+                'N' => .NotNewline,
+                'V' => .NotVerticalWhitespace,
                 't', 'n', 'r', 'a', 'e', 'f', 'v', '0', 'c' => .Literal,
                 '\\' => .Literal,
                 '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => .Literal,

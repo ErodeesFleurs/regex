@@ -8,19 +8,29 @@ const OpCode = @import("bytecode.zig").OpCode;
 
 const RegexOptions = @import("options.zig").RegexOptions;
 
+const GroupRange = struct {
+    start: usize,
+    end: usize,
+};
+
 pub const Compiler = struct {
     bytecode: Bytecode,
     allocator: std.mem.Allocator,
     options: RegexOptions = .{},
-    
+    group_ranges: std.AutoHashMap(usize, GroupRange),
+    recursion_depth: usize = 0,
+    max_recursion_depth: usize = 10,
+
     pub fn init(allocator: std.mem.Allocator) Compiler {
         return .{
             .bytecode = Bytecode.init(allocator),
             .allocator = allocator,
+            .group_ranges = std.AutoHashMap(usize, GroupRange).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *Compiler) void {
+        self.group_ranges.deinit();
         self.bytecode.deinit();
     }
     
@@ -30,7 +40,20 @@ pub const Compiler = struct {
         
         // Append Match instruction as terminator
         _ = try self.bytecode.emit(.{ .opcode = .Match });
-        
+
+        // Patch SubroutineCall targets to point to group starts
+        for (self.bytecode.instructions.items, 0..) |*inst, i| {
+            if (inst.opcode == .SubroutineCall) {
+                const group_idx = inst.subroutine_group.?;
+                if (self.group_ranges.get(group_idx)) |range| {
+                    inst.target = range.start;
+                } else {
+                    // Group not defined: treat as no-op (jump to next instruction)
+                    inst.target = i + 1;
+                }
+            }
+        }
+
         // Set first literal char for fast skipping in find()
         if (self.bytecode.instructions.items.len > 0) {
             const first_inst = self.bytecode.instructions.items[0];
@@ -38,7 +61,7 @@ pub const Compiler = struct {
                 self.bytecode.first_char = first_inst.char;
             }
         }
-        
+
         return self.bytecode;
     }
     
@@ -224,18 +247,26 @@ pub const Compiler = struct {
             .Group => {
                 if (node.group_index) |group_idx| {
                     // Capturing group: emit Save instructions
+                    const group_start = self.bytecode.getPC();
                     _ = try self.bytecode.emit(.{
                         .opcode = .Save,
                         .save_slot = group_idx * 2,
                     });
-                    
+
                     try self.compileNode(node.left.?);
-                    
+                    const inner_end = self.bytecode.getPC();
+
+                    // SubroutineReturn: returns to caller if entered via SubroutineCall
+                    _ = try self.bytecode.emit(.{ .opcode = .SubroutineReturn });
+
                     _ = try self.bytecode.emit(.{
                         .opcode = .Save,
                         .save_slot = group_idx * 2 + 1,
                     });
-                    
+
+                    // Record the group start (including Save start) for subroutine calls
+                    self.group_ranges.put(group_idx, GroupRange{ .start = group_start, .end = inner_end }) catch {};
+
                     if (group_idx > self.bytecode.num_groups) {
                         self.bytecode.num_groups = group_idx;
                     }
@@ -331,6 +362,18 @@ pub const Compiler = struct {
             },
             .GraphemeCluster => {
                 _ = try self.bytecode.emit(.{ .opcode = .GraphemeCluster });
+            },
+            .Newline => {
+                _ = try self.bytecode.emit(.{ .opcode = .Newline });
+            },
+            .ResetMatchStart => {
+                _ = try self.bytecode.emit(.{ .opcode = .ResetMatchStart });
+            },
+            .NotNewline => {
+                _ = try self.bytecode.emit(.{ .opcode = .NotNewline });
+            },
+            .NotVerticalWhitespace => {
+                _ = try self.bytecode.emit(.{ .opcode = .NotVerticalWhitespace });
             },
             .Empty => {
                 // Empty expression generates no instructions
@@ -524,6 +567,13 @@ pub const Compiler = struct {
                         }
                     }
                 }
+            },
+            .SubroutineCall => {
+                const group_idx = node.value.?;
+                _ = try self.bytecode.emit(.{
+                    .opcode = .SubroutineCall,
+                    .subroutine_group = group_idx,
+                });
             },
         }
     }

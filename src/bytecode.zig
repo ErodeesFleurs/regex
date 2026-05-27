@@ -57,6 +57,22 @@ pub const OpCode = enum(u8) {
 
     // Conditional (?(n)yes|no)
     Conditional,
+
+    // Subroutine calls
+    SubroutineCall,
+    SubroutineReturn,
+
+    // Newline sequence \R
+    Newline,
+
+    // Reset match start \K
+    ResetMatchStart,
+
+    // Not newline \N
+    NotNewline,
+
+    // Not vertical whitespace \V
+    NotVerticalWhitespace,
 };
 
 pub const Instruction = struct {
@@ -70,7 +86,8 @@ pub const Instruction = struct {
     options: ?RegexOptions = null,
     unicode_property: ?[]const u8 = null,
     unicode_negated: bool = false,
-    
+    subroutine_group: ?usize = null,
+
     pub fn format(self: Instruction, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.opcode) {
             .Char => try writer.print("Char({c})", .{self.char.?}),
@@ -103,6 +120,12 @@ pub const Instruction = struct {
                 self.unicode_property.?, 
             }),
             .Conditional => try writer.print("Conditional({}) -> {}", .{self.backref_group.?, self.target.?}),
+            .SubroutineCall => try writer.print("SubroutineCall({}) -> {}", .{self.subroutine_group.?, self.target.?}),
+            .SubroutineReturn => try writer.print("SubroutineReturn", .{}),
+            .Newline => try writer.print("Newline", .{}),
+            .ResetMatchStart => try writer.print("ResetMatchStart", .{}),
+            .NotNewline => try writer.print("NotNewline", .{}),
+            .NotVerticalWhitespace => try writer.print("NotVerticalWhitespace", .{}),
         }
     }
 };

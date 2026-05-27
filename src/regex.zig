@@ -39,9 +39,9 @@ pub const Regex = struct {
         }
 
         var compiler = Compiler.init(allocator);
-        // Note: do not deinit compiler here because bytecode needs to be kept
 
         const bytecode = try compiler.compile(ast.?, options);
+        compiler.group_ranges.deinit();
 
         var group_names: std.ArrayList(GroupNameEntry) = .empty;
         var it = parser.group_names.iterator();

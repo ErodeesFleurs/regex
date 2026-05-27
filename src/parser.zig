@@ -42,6 +42,11 @@ pub const NodeType = enum {
     NotUnicodeProperty,  // negated Unicode property \P{...}
     GraphemeCluster,     // grapheme cluster \X
     Conditional,   // conditional (?(n)yes|no)
+    SubroutineCall, // subroutine call (?1) or (?&name)
+    Newline,       // newline sequence \R
+    ResetMatchStart, // \K reset match start
+    NotNewline,    // \N not newline
+    NotVerticalWhitespace, // \V not vertical whitespace
     Empty,         // empty expression
 };
 
@@ -238,6 +243,8 @@ pub const Parser = struct {
     group_counter: usize,
     group_names: std.StringHashMap(usize),
     last_error: ?ParseErrorInfo,
+    // Branch reset group support: stack of base group counters
+    branch_reset_stack: std.ArrayList(usize),
 
     pub fn init(allocator: std.mem.Allocator, input: []const u8) Parser {
         return initWithOptions(allocator, input, .{});
@@ -252,11 +259,13 @@ pub const Parser = struct {
             .group_counter = 0,
             .group_names = std.StringHashMap(usize).init(allocator),
             .last_error = null,
+            .branch_reset_stack = .empty,
         };
     }
 
     pub fn deinit(self: *Parser) void {
         self.group_names.deinit();
+        self.branch_reset_stack.deinit(self.allocator);
     }
 
     fn setError(self: *Parser, message: []const u8, position: usize) void {
@@ -308,6 +317,11 @@ pub const Parser = struct {
             if (token.type != .Pipe) break;
 
             _ = self.tokenizer.nextToken(); // consume '|'
+
+            // Branch reset: reset group counter to base at each branch boundary
+            if (self.branch_reset_stack.items.len > 0) {
+                self.group_counter = self.branch_reset_stack.items[self.branch_reset_stack.items.len - 1];
+            }
 
             var right = try self.parseTerm();
             if (right == null) {
@@ -618,11 +632,11 @@ pub const Parser = struct {
                 };
                 return node;
             },
-            .Digit, .NotDigit, .Word, .NotWord, .Whitespace, .NotWhitespace => {
+            .Digit, .NotDigit, .Word, .NotWord, .Whitespace, .NotWhitespace, .HorizontalWhitespace, .NotHorizontalWhitespace => {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
                 const negated = switch (token.type) {
-                    .NotDigit, .NotWord, .NotWhitespace => true,
+                    .NotDigit, .NotWord, .NotWhitespace, .NotHorizontalWhitespace => true,
                     else => false,
                 };
                 var cc = CharClass.init(self.allocator, negated);
@@ -640,6 +654,10 @@ pub const Parser = struct {
                         try cc.addRange(' ', ' ');
                         try cc.addRange('\n', '\n');
                         try cc.addRange('\r', '\r');
+                    },
+                    .HorizontalWhitespace, .NotHorizontalWhitespace => {
+                        try cc.addRange('\t', '\t');
+                        try cc.addRange(' ', ' ');
                     },
                     else => unreachable,
                 }
@@ -781,6 +799,58 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
                     .type = .GraphemeCluster,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .Newline => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .Newline,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .ResetMatchStart => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .ResetMatchStart,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .NotNewline => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .NotNewline,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            },
+            .NotVerticalWhitespace => {
+                _ = self.tokenizer.nextToken();
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .NotVerticalWhitespace,
                     .value = null,
                     .left = null,
                     .right = null,
@@ -992,6 +1062,17 @@ pub const Parser = struct {
                         try cc.addRange(' ' + 1, 255);
                         break :blk true;
                     },
+                    'h' => blk: {
+                        try cc.addRange('\t', '\t');
+                        try cc.addRange(' ', ' ');
+                        break :blk true;
+                    },
+                    'H' => blk: {
+                        try cc.addRange(0, '\t' - 1);
+                        try cc.addRange('\t' + 1, ' ' - 1);
+                        try cc.addRange(' ' + 1, 255);
+                        break :blk true;
+                    },
                     else => false,
                 };
                 if (shorthand_handled) {
@@ -1061,6 +1142,7 @@ pub const Parser = struct {
                 'n' => return .{ .cp = '\n', .unicode = false },
                 'r' => return .{ .cp = '\r', .unicode = false },
                 'a' => return .{ .cp = '\x07', .unicode = false },
+                'b' => return .{ .cp = '\x08', .unicode = false }, // backspace inside char class
                 'e' => return .{ .cp = '\x1B', .unicode = false },
                 'f' => return .{ .cp = '\x0C', .unicode = false },
                 'v' => return .{ .cp = '\x0B', .unicode = false },
@@ -1123,6 +1205,54 @@ pub const Parser = struct {
         if (next_token.type == .Question) {
             _ = self.tokenizer.nextToken(); // consume '?'
             const special = self.tokenizer.peek();
+
+            // Comment: (?#comment)
+            if (special.type == .Literal and special.value.len == 1 and special.value[0] == '#') {
+                _ = self.tokenizer.nextToken(); // consume '#'
+                // Skip everything until ')'
+                while (true) {
+                    const t = self.tokenizer.nextToken();
+                    if (t.type == .RParen or t.type == .EOF) break;
+                }
+                // Return empty node (comment contributes nothing to match)
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .Empty,
+                    .value = null,
+                    .left = null,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            }
+
+            // Branch reset group: (?|...|...)
+            if (special.type == .Pipe) {
+                _ = self.tokenizer.nextToken(); // consume '|'
+                // Save base counter; groups within each branch start from base+1
+                const base = self.group_counter;
+                try self.branch_reset_stack.append(self.allocator, base);
+                const inner = try self.parseExpression() orelse {
+                    self.setErrorAtToken("Empty branch reset group", self.tokenizer.peek());
+                    return error.EmptyGroup;
+                };
+                _ = self.branch_reset_stack.pop();
+                _ = self.tokenizer.expect(.RParen) catch {
+                    self.setErrorAtToken("Unclosed branch reset group", self.tokenizer.peek());
+                    return error.UnexpectedToken;
+                };
+                const node = try self.allocator.create(AstNode);
+                node.* = .{
+                    .type = .Group,
+                    .value = null,
+                    .left = inner,
+                    .right = null,
+                    .char_class = null,
+                    .group_index = null,
+                };
+                return node;
+            }
 
             // Conditional: (?(...)...)
             if (special.type == .LParen) {
@@ -1251,6 +1381,65 @@ pub const Parser = struct {
                     .condition = cond_node,
                 };
                 return node;
+            }
+
+            // Subroutine call: (?1), (?2), ... or (?&name)
+            if (special.type == .Literal and special.value.len >= 1) {
+                var is_subroutine = false;
+                var subroutine_group: usize = 0;
+
+                // Check for (?N) — numeric subroutine call
+                if (std.fmt.parseInt(usize, special.value, 10)) |n| {
+                    is_subroutine = true;
+                    subroutine_group = n;
+                    _ = self.tokenizer.nextToken(); // consume the number
+                } else |_| {
+                    // Check for (?&name)
+                    if (special.value.len == 1 and special.value[0] == '&') {
+                        _ = self.tokenizer.nextToken(); // consume '&'
+                        var name_buf: [64]u8 = undefined;
+                        var name_len: usize = 0;
+                        while (true) {
+                            const name_token = self.tokenizer.peek();
+                            if (name_token.type == .Literal and name_token.value.len == 1) {
+                                if (name_token.value[0] == ')') break;
+                                if (name_len < name_buf.len) {
+                                    name_buf[name_len] = name_token.value[0];
+                                    name_len += 1;
+                                    _ = self.tokenizer.nextToken(); // consume char
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if (name_len > 0) {
+                            const name = name_buf[0..name_len];
+                            if (self.group_names.get(name)) |n| {
+                                is_subroutine = true;
+                                subroutine_group = n;
+                            }
+                        }
+                    }
+                }
+
+                if (is_subroutine) {
+                    _ = self.tokenizer.expect(.RParen) catch {
+                        self.setErrorAtToken("Unclosed subroutine call", self.tokenizer.peek());
+                        return error.UnexpectedToken;
+                    };
+                    const node = try self.allocator.create(AstNode);
+                    node.* = .{
+                        .type = .SubroutineCall,
+                        .value = subroutine_group,
+                        .left = null,
+                        .right = null,
+                        .char_class = null,
+                        .group_index = null,
+                    };
+                    return node;
+                }
             }
 
             _ = self.tokenizer.nextToken(); // consume special
@@ -1505,19 +1694,19 @@ pub const Parser = struct {
             // Ordinary capturing group
             self.group_counter += 1;
             const group_index = self.group_counter;
-            
+
             const inner = try self.parseExpression() orelse {
                 self.setErrorAtToken("Empty group", self.tokenizer.peek());
                 return error.EmptyGroup;
             };
-            
+
             _ = self.tokenizer.expect(.RParen) catch {
                 self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
                 inner.deinit(self.allocator);
                 self.allocator.destroy(inner);
                 return error.UnexpectedToken;
             };
-            
+
             const node = try self.allocator.create(AstNode);
             node.* = .{
                 .type = .Group,

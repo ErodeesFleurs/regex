@@ -44,6 +44,7 @@ const Frame = struct {
     paired_capture_slot: ?usize = null,
     paired_capture_old_value: ?usize = null,
     options: RegexOptions,
+    subroutine_stack_len: usize = 0,
 };
 
 fn isUnicodeProperty(cp: u21, property: []const u8) bool {
@@ -1762,6 +1763,54 @@ fn matchUnicodePropertyInClass(input: []const u8, pos: usize, cc: @import("parse
 
 /// Match a single grapheme cluster (simplified implementation).
 /// Returns the total byte length of the cluster, or null if no cluster at pos.
+fn matchNewline(input: []const u8, pos: usize) ?usize {
+    if (pos >= input.len) return null;
+
+    // CRLF sequence
+    if (input[pos] == '\r' and pos + 1 < input.len and input[pos + 1] == '\n') {
+        return 2;
+    }
+
+    // Single-byte line endings
+    switch (input[pos]) {
+        '\r', '\n', '\x0B', '\x0C', '\x85' => return 1,
+        else => {},
+    }
+
+    // Multi-byte line endings: U+2028 (LS) and U+2029 (PS)
+    if (input[pos] == 0xE2 and pos + 2 < input.len) {
+        if (input[pos + 1] == 0x80) {
+            if (input[pos + 2] == 0xA8 or input[pos + 2] == 0xA9) {
+                return 3;
+            }
+        }
+    }
+
+    return null;
+}
+
+/// Check if the character at pos is a vertical whitespace character.
+/// Returns the byte length of the character (1 or 3), or null if not vertical whitespace.
+fn isVerticalWhitespace(input: []const u8, pos: usize) ?usize {
+    if (pos >= input.len) return null;
+
+    switch (input[pos]) {
+        '\n', '\r', '\x0B', '\x0C', '\x85' => return 1,
+        else => {},
+    }
+
+    // Multi-byte: U+2028 (LS) and U+2029 (PS)
+    if (input[pos] == 0xE2 and pos + 2 < input.len) {
+        if (input[pos + 1] == 0x80) {
+            if (input[pos + 2] == 0xA8 or input[pos + 2] == 0xA9) {
+                return 3;
+            }
+        }
+    }
+
+    return null;
+}
+
 fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
     if (pos >= input.len) return null;
 
@@ -1828,6 +1877,9 @@ pub const Vm = struct {
         var sub_stack: std.ArrayList(Frame) = .empty;
         defer sub_stack.deinit(self.allocator);
 
+        var sub_subroutine_stack: std.ArrayList(usize) = .empty;
+        defer sub_subroutine_stack.deinit(self.allocator);
+
         while (true) {
             if (max_steps) |limit| {
                 if (step_counter >= limit) {
@@ -1855,6 +1907,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1866,6 +1919,7 @@ pub const Vm = struct {
                     if (sub_pos >= input.len) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1876,6 +1930,7 @@ pub const Vm = struct {
                     const byte_len = std.unicode.utf8ByteSequenceLength(input[sub_pos]) catch {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1886,6 +1941,7 @@ pub const Vm = struct {
                     if (sub_pos + byte_len > input.len) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1896,6 +1952,7 @@ pub const Vm = struct {
                     const cp = std.unicode.utf8Decode(input[sub_pos..sub_pos + byte_len]) catch {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1914,6 +1971,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1928,6 +1986,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1980,6 +2039,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -1994,6 +2054,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2008,6 +2069,56 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .Newline => {
+                    if (matchNewline(input, sub_pos)) |byte_len| {
+                        sub_pc += 1;
+                        sub_pos += byte_len;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .ResetMatchStart => {
+                    sub_captures.items[0] = sub_pos;
+                    sub_pc += 1;
+                },
+                .NotNewline => {
+                    if (sub_pos < input.len and input[sub_pos] != '\n') {
+                        sub_pc += 1;
+                        sub_pos += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
+                        sub_pc = frame.pc;
+                        sub_pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            sub_captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .NotVerticalWhitespace => {
+                    if (sub_pos < input.len and isVerticalWhitespace(input, sub_pos) == null) {
+                        sub_pc += 1;
+                        sub_pos += 1;
+                    } else {
+                        if (sub_stack.items.len == 0) break;
+                        const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2022,6 +2133,7 @@ pub const Vm = struct {
                         .capture_slot = null,
                         .capture_old_value = null,
                         .options = self.options,
+                        .subroutine_stack_len = sub_subroutine_stack.items.len,
                     });
                     sub_pc += 1;
                 },
@@ -2038,6 +2150,7 @@ pub const Vm = struct {
                         .capture_slot = slot,
                         .capture_old_value = old_val,
                         .options = self.options,
+                        .subroutine_stack_len = sub_subroutine_stack.items.len,
                     };
                     // If this is an end slot, also save the paired start slot
                     if (slot % 2 == 1) {
@@ -2063,6 +2176,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2080,6 +2194,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2093,6 +2208,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2106,6 +2222,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2119,6 +2236,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2132,6 +2250,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2181,6 +2300,7 @@ pub const Vm = struct {
                     if (start_slot >= sub_captures.items.len or end_slot >= sub_captures.items.len) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2193,6 +2313,7 @@ pub const Vm = struct {
                     if (group_start == null or group_end == null) {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2212,6 +2333,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2227,6 +2349,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2242,6 +2365,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2269,6 +2393,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2296,6 +2421,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2336,6 +2462,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2373,6 +2500,7 @@ pub const Vm = struct {
                     } else {
                         if (sub_stack.items.len == 0) break;
                         const frame = sub_stack.pop().?;
+                        sub_subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
                         sub_pc = frame.pc;
                         sub_pos = frame.pos;
                         if (frame.capture_slot) |slot| {
@@ -2382,6 +2510,19 @@ pub const Vm = struct {
                 },
                 .AssertBackwardEnd => {
                     sub_pc += 1;
+                },
+                .SubroutineCall => {
+                    if (inst.target.? != sub_pc + 1) {
+                        try sub_subroutine_stack.append(self.allocator, sub_pc + 1);
+                    }
+                    sub_pc = inst.target.?;
+                },
+                .SubroutineReturn => {
+                    if (sub_subroutine_stack.items.len > 0) {
+                        sub_pc = sub_subroutine_stack.pop().?;
+                    } else {
+                        sub_pc += 1;
+                    }
                 },
             }
         }
@@ -2456,6 +2597,9 @@ pub const Vm = struct {
         try last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
         @memset(last_pos.items, null);
 
+        var subroutine_stack: std.ArrayList(usize) = .empty;
+        defer subroutine_stack.deinit(self.allocator);
+
         while (true) {
             if (max_steps) |limit| {
                 if (step_counter >= limit) {
@@ -2468,8 +2612,9 @@ pub const Vm = struct {
             if (pc >= self.bytecode.instructions.items.len) {
                 // backtrack
                 if (stack.items.len == 0) break;
-                const frame = stack.pop().?;
-                self.options = frame.options;
+const frame = stack.pop().?;
+                    subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
+                    self.options = frame.options;
                 pc = frame.pc;
                 pos = frame.pos;
                 self.options = frame.options;
@@ -2677,6 +2822,57 @@ pub const Vm = struct {
                         }
                     }
                 },
+                .Newline => {
+                    if (matchNewline(input, pos)) |byte_len| {
+                        pc += 1;
+                        pos += byte_len;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        self.options = frame.options;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .ResetMatchStart => {
+                    captures.items[0] = pos;
+                    pc += 1;
+                },
+                .NotNewline => {
+                    // \N matches any character except newline (\n). Default newline = \n.
+                    if (pos < input.len and input[pos] != '\n') {
+                        pc += 1;
+                        pos += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        self.options = frame.options;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
+                .NotVerticalWhitespace => {
+                    // \V matches any character except vertical whitespace.
+                    if (pos < input.len and isVerticalWhitespace(input, pos) == null) {
+                        pc += 1;
+                        pos += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        const frame = stack.pop().?;
+                        self.options = frame.options;
+                        pc = frame.pc;
+                        pos = frame.pos;
+                        if (frame.capture_slot) |slot| {
+                            captures.items[slot] = frame.capture_old_value;
+                        }
+                    }
+                },
                 .Split => {
                     // Zero-length loop detection
                     if (last_pos.items[pc]) |lp| {
@@ -2694,6 +2890,7 @@ pub const Vm = struct {
                         .capture_slot = null,
                         .capture_old_value = null,
                         .options = self.options,
+                        .subroutine_stack_len = subroutine_stack.items.len,
                     });
                     pc += 1;
                 },
@@ -2711,6 +2908,7 @@ pub const Vm = struct {
                         .capture_slot = slot,
                         .capture_old_value = old_val,
                         .options = self.options,
+                        .subroutine_stack_len = subroutine_stack.items.len,
                     };
                     // If this is an end slot, also save the paired start slot
                     if (slot % 2 == 1) {
@@ -2724,7 +2922,9 @@ pub const Vm = struct {
                 .Match => {
                     matched = true;
                     match_end = pos;
-                    captures.items[0] = start_pos;
+                    if (captures.items[0] == null) {
+                        captures.items[0] = start_pos;
+                    }
                     captures.items[1] = pos;
                     break;
                 },
@@ -3077,13 +3277,26 @@ pub const Vm = struct {
                 .AssertBackwardEnd => {
                     pc += 1;
                 },
+                .SubroutineCall => {
+                    if (inst.target.? != pc + 1) {
+                        try subroutine_stack.append(self.allocator, pc + 1);
+                    }
+                    pc = inst.target.?;
+                },
+                .SubroutineReturn => {
+                    if (subroutine_stack.items.len > 0) {
+                        pc = subroutine_stack.pop().?;
+                    } else {
+                        pc += 1;
+                    }
+                },
             }
         }
 
         return MatchResult{
             .matched = matched,
             .captures = captures,
-            .start = start_pos,
+            .start = if (captures.items[0]) |s| s else start_pos,
             .end = match_end,
             .allocator = self.allocator,
         };

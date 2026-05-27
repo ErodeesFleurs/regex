@@ -209,3 +209,37 @@ test "relative backref: numeric \\g{1}" {
     try std.testing.expect(try re.isMatch("test test"));
     try std.testing.expect(!try re.isMatch("test other"));
 }
+
+// Subroutine calls: (?1), (?&name)
+test "subroutine call: (?1) numeric" {
+    const allocator = std.testing.allocator;
+    // (a(?1)?) matches "a", "aa", "aaa" via recursion
+    var re = try regex.compile(allocator, "^(a(?1)?)$");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("a"));
+    try std.testing.expect(try re.isMatch("aa"));
+    try std.testing.expect(try re.isMatch("aaa"));
+    try std.testing.expect(!try re.isMatch("b"));
+}
+
+test "subroutine call: (?&name) named" {
+    const allocator = std.testing.allocator;
+    // (?<x>a(?&x)?) recursive named subroutine
+    var re = try regex.compile(allocator, "^(?<x>a(?&x)?)$");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("a"));
+    try std.testing.expect(try re.isMatch("aa"));
+    try std.testing.expect(!try re.isMatch("b"));
+}
+
+test "subroutine call: non-recursive (?1)" {
+    const allocator = std.testing.allocator;
+    // (abc)(?1) matches "abcabc" by copying group 1 content
+    var re = try regex.compile(allocator, "^(abc)(?1)$");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("abcabc"));
+    try std.testing.expect(!try re.isMatch("abcabd"));
+}
