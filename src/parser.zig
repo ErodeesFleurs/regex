@@ -279,6 +279,19 @@ pub const Parser = struct {
         self.setError(message, token.position);
     }
 
+    fn createEmptyNode(self: *Parser) !*AstNode {
+        const node = try self.allocator.create(AstNode);
+        node.* = .{
+            .type = .Empty,
+            .value = null,
+            .left = null,
+            .right = null,
+            .char_class = null,
+            .group_index = null,
+        };
+        return node;
+    }
+
     pub fn parse(self: *Parser) !?*AstNode {
         var node = try self.parseExpression();
 
@@ -294,15 +307,7 @@ pub const Parser = struct {
         }
 
         if (node == null) {
-            node = try self.allocator.create(AstNode);
-            node.?.* = .{
-                .type = .Empty,
-                .value = null,
-                .left = null,
-                .right = null,
-                .char_class = null,
-                .group_index = null,
-            };
+            node = try self.createEmptyNode();
         }
 
         return node;
@@ -325,15 +330,7 @@ pub const Parser = struct {
 
             var right = try self.parseTerm();
             if (right == null) {
-                right = try self.allocator.create(AstNode);
-                right.?.* = .{
-                    .type = .Empty,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
+                right = try self.createEmptyNode();
             }
 
             const node = try self.allocator.create(AstNode);
@@ -1215,16 +1212,7 @@ pub const Parser = struct {
                     if (t.type == .RParen or t.type == .EOF) break;
                 }
                 // Return empty node (comment contributes nothing to match)
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .Empty,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createEmptyNode();
             }
 
             // Branch reset group: (?|...|...)
