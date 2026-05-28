@@ -108,6 +108,14 @@ pub const Tokenizer = struct {
         };
     }
 
+    fn makeToken(self: *Tokenizer, token_type: TokenType, start_pos: usize) Token {
+        return .{
+            .type = token_type,
+            .value = self.input[start_pos..self.position],
+            .position = start_pos,
+        };
+    }
+
     pub fn nextToken(self: *Tokenizer) Token {
         if (self.position >= self.input.len) {
             return .{
