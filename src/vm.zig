@@ -71,6 +71,21 @@ inline fn backtrack(
     }
 }
 
+/// Pop frame and backtrack if stack is non-empty. Returns false if stack was empty.
+inline fn maybeBacktrack(
+    comptime is_sub: bool,
+    stack: *std.ArrayList(Frame),
+    captures: *std.ArrayList(?usize),
+    pc: *usize,
+    pos: *usize,
+    subroutine_stack: *std.ArrayList(usize),
+    options: *RegexOptions,
+) bool {
+    if (stack.items.len == 0) return false;
+    backtrack(is_sub, stack.pop().?, captures, pc, pos, subroutine_stack, options);
+    return true;
+}
+
 /// Match a CharClass instruction at the given position.
 /// Returns the byte length to advance if matched, null otherwise.
 inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_sensitive: bool) ?usize {
@@ -2054,8 +2069,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .CharUtf8 => {
@@ -2063,8 +2077,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += byte_len;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .Any => {
@@ -2072,8 +2085,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .CharClass => {
@@ -2081,8 +2093,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += adv;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .UnicodeProperty => {
@@ -2090,8 +2101,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += byte_len;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .GraphemeCluster => {
@@ -2099,8 +2109,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += byte_len;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .Newline => {
@@ -2108,8 +2117,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += byte_len;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .ResetMatchStart => {
@@ -2121,8 +2129,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .NotVerticalWhitespace => {
@@ -2130,8 +2137,7 @@ pub const Vm = struct {
                         pc += 1;
                         pos += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .Split => {
@@ -2224,64 +2230,56 @@ pub const Vm = struct {
                         pc += 1;
                         pos += len;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .WordBoundary => {
                     if (checkWordBoundary(input, pos)) {
                         pc += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .NotWordBoundary => {
                     if (!checkWordBoundary(input, pos)) {
                         pc += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertStart => {
                     if (checkAssertStart(pos, input, self.options.multiline)) {
                         pc += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertEnd => {
                     if (checkAssertEnd(pos, input, self.options.multiline)) {
                         pc += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertStringStart => {
                     if (pos == 0) {
                         pc += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertStringEnd => {
                     if (pos == input.len) {
                         pc += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertStringEndAllowNewline => {
                     if (pos == input.len or (pos + 1 == input.len and input[pos] == '\n')) {
                         pc += 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertMatchStart => {
@@ -2303,8 +2301,7 @@ pub const Vm = struct {
                     if (sub_result.matched) {
                         pc = epc + 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertForwardNegative => {
@@ -2314,8 +2311,7 @@ pub const Vm = struct {
                     if (!sub_result.matched) {
                         pc = epc + 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertForwardEnd => {
@@ -2338,8 +2334,7 @@ pub const Vm = struct {
                     if (success) {
                         pc = epc + 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertBackwardNegative => {
@@ -2359,8 +2354,7 @@ pub const Vm = struct {
                     if (success) {
                         pc = epc + 1;
                     } else {
-                        if (stack.items.len == 0) break;
-                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertBackwardEnd => {

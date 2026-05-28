@@ -1,67 +1,60 @@
 const std = @import("std");
 const regex = @import("../root.zig");
+const h = @import("helpers.zig");
 
 // Henry Spencer-inspired literal match correctness tests.
 // These are the canonical baseline tests for any regex engine.
 
 test "literal: exact match" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "abc", "abc"));
-    try std.testing.expect(!try regex.isMatch(allocator, "abc", "ab"));
+    try h.expectMatch("abc", "abc");
+    try h.expectNoMatch("abc", "ab");
     // isMatch uses prefix semantics (matches from position 0, need not consume entire string).
-    try std.testing.expect(try regex.isMatch(allocator, "abc", "abcd"));
+    try h.expectMatch("abc", "abcd");
 }
 
 test "literal: empty pattern" {
-    const allocator = std.testing.allocator;
     // Empty regex matches empty string at position 0.
-    try std.testing.expect(try regex.isMatch(allocator, "", ""));
-    try std.testing.expect(try regex.isMatch(allocator, "", "abc"));
+    try h.expectMatch("", "");
+    try h.expectMatch("", "abc");
 }
 
 test "literal: single character" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "a", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "a", "b"));
-    try std.testing.expect(!try regex.isMatch(allocator, "a", ""));
+    try h.expectMatch("a", "a");
+    try h.expectNoMatch("a", "b");
+    try h.expectNoMatch("a", "");
 }
 
 test "literal: escaped special chars" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\.", "."));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\.", "a"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\*", "*"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\+", "+"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\?", "?"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\[", "["));
-    try std.testing.expect(try regex.isMatch(allocator, "\\]", "]"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\(", "("));
-    try std.testing.expect(try regex.isMatch(allocator, "\\)", ")"));
+    try h.expectMatch("\\.", ".");
+    try h.expectNoMatch("\\.", "a");
+    try h.expectMatch("\\*", "*");
+    try h.expectMatch("\\+", "+");
+    try h.expectMatch("\\?", "?");
+    try h.expectMatch("\\[", "[");
+    try h.expectMatch("\\]", "]");
+    try h.expectMatch("\\(", "(");
+    try h.expectMatch("\\)", ")");
 }
 
 test "literal: escaped backslash" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\\\", "\\"));
+    try h.expectMatch("\\\\", "\\");
 }
 
 test "literal: escaped whitespace" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\t", "\t"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\n", "\n"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\r", "\r"));
+    try h.expectMatch("\\t", "\t");
+    try h.expectMatch("\\n", "\n");
+    try h.expectMatch("\\r", "\r");
 }
 
 test "literal: case sensitivity" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "Hello", "Hello"));
-    try std.testing.expect(!try regex.isMatch(allocator, "Hello", "hello"));
-    try std.testing.expect(!try regex.isMatch(allocator, "Hello", "HELLO"));
+    try h.expectMatch("Hello", "Hello");
+    try h.expectNoMatch("Hello", "hello");
+    try h.expectNoMatch("Hello", "HELLO");
 }
 
 test "literal: long string" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "abcdefghij", "abcdefghij"));
-    try std.testing.expect(!try regex.isMatch(allocator, "abcdefghij", "abcdefghi"));
+    try h.expectMatch("abcdefghij", "abcdefghij");
+    try h.expectNoMatch("abcdefghij", "abcdefghi");
 }
 
 test "literal: substring via find" {
