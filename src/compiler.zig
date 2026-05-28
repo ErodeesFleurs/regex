@@ -33,13 +33,18 @@ pub const Compiler = struct {
         self.group_ranges.deinit();
         self.bytecode.deinit();
     }
-    
+
+    /// Emit a single opcode with no operands.
+    inline fn emitOp(self: *Compiler, op: OpCode) !void {
+        _ = try self.bytecode.emit(.{ .opcode = op });
+    }
+
     pub fn compile(self: *Compiler, ast: *AstNode, options: RegexOptions) !Bytecode {
         self.options = options;
         try self.compileNode(ast);
         
         // Append Match instruction as terminator
-        _ = try self.bytecode.emit(.{ .opcode = .Match });
+        try self.emitOp(.Match);
 
         // Patch SubroutineCall targets to point to group starts
         for (self.bytecode.instructions.items, 0..) |*inst, i| {
@@ -99,9 +104,7 @@ pub const Compiler = struct {
                     }
                 }
             },
-            .Any => {
-                _ = try self.bytecode.emit(.{ .opcode = .Any });
-            },
+            .Any => try self.emitOp(.Any),
             .CharClass => {
                 const cc = try self.allocator.create(CharClass);
                 if (node.char_class_transferred) {
@@ -203,24 +206,24 @@ pub const Compiler = struct {
                 try self.compileQuantifier(node, true);
             },
             .PossessiveStar => {
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
+                try self.emitOp(.AtomicStart);
                 try self.emitLoop(node.left.?, 0, null, false);
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
+                try self.emitOp(.AtomicEnd);
             },
             .PossessivePlus => {
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
+                try self.emitOp(.AtomicStart);
                 try self.emitLoop(node.left.?, 1, null, false);
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
+                try self.emitOp(.AtomicEnd);
             },
             .PossessiveQuestion => {
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
+                try self.emitOp(.AtomicStart);
                 try self.emitLoop(node.left.?, 0, 1, false);
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
+                try self.emitOp(.AtomicEnd);
             },
             .PossessiveQuantifier => {
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
+                try self.emitOp(.AtomicStart);
                 try self.compileQuantifier(node, false);
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
+                try self.emitOp(.AtomicEnd);
             },
             .Backref => {
                 _ = try self.bytecode.emit(.{
@@ -228,12 +231,8 @@ pub const Compiler = struct {
                     .backref_group = node.value.?,
                 });
             },
-            .WordBoundary => {
-                _ = try self.bytecode.emit(.{ .opcode = .WordBoundary });
-            },
-            .NotWordBoundary => {
-                _ = try self.bytecode.emit(.{ .opcode = .NotWordBoundary });
-            },
+            .WordBoundary => try self.emitOp(.WordBoundary),
+            .NotWordBoundary => try self.emitOp(.NotWordBoundary),
             .UnicodeProperty => {
                 const prop_copy = try self.allocator.dupe(u8, node.unicode_property.?);
                 try self.bytecode.unicode_properties.append(self.allocator, prop_copy);
@@ -252,66 +251,37 @@ pub const Compiler = struct {
                     .unicode_negated = true,
                 });
             },
-            .GraphemeCluster => {
-                _ = try self.bytecode.emit(.{ .opcode = .GraphemeCluster });
-            },
-            .Newline => {
-                _ = try self.bytecode.emit(.{ .opcode = .Newline });
-            },
-            .ResetMatchStart => {
-                _ = try self.bytecode.emit(.{ .opcode = .ResetMatchStart });
-            },
-            .NotNewline => {
-                _ = try self.bytecode.emit(.{ .opcode = .NotNewline });
-            },
-            .NotVerticalWhitespace => {
-                _ = try self.bytecode.emit(.{ .opcode = .NotVerticalWhitespace });
-            },
-            .Empty => {
-                // Empty expression generates no instructions
-            },
-            .AssertStart => {
-                _ = try self.bytecode.emit(.{ .opcode = .AssertStart });
-            },
-            .AssertEnd => {
-                _ = try self.bytecode.emit(.{ .opcode = .AssertEnd });
-            },
-            .AssertStringStart => {
-                _ = try self.bytecode.emit(.{ .opcode = .AssertStringStart });
-            },
-            .AssertStringEnd => {
-                _ = try self.bytecode.emit(.{ .opcode = .AssertStringEnd });
-            },
-            .AssertStringEndAllowNewline => {
-                _ = try self.bytecode.emit(.{ .opcode = .AssertStringEndAllowNewline });
-            },
-            .AssertMatchStart => {
-                _ = try self.bytecode.emit(.{ .opcode = .AssertMatchStart });
-            },
+            .GraphemeCluster => try self.emitOp(.GraphemeCluster),
+            .Newline => try self.emitOp(.Newline),
+            .ResetMatchStart => try self.emitOp(.ResetMatchStart),
+            .NotNewline => try self.emitOp(.NotNewline),
+            .NotVerticalWhitespace => try self.emitOp(.NotVerticalWhitespace),
+            .Empty => {},
+            .AssertStart => try self.emitOp(.AssertStart),
+            .AssertEnd => try self.emitOp(.AssertEnd),
+            .AssertStringStart => try self.emitOp(.AssertStringStart),
+            .AssertStringEnd => try self.emitOp(.AssertStringEnd),
+            .AssertStringEndAllowNewline => try self.emitOp(.AssertStringEndAllowNewline),
+            .AssertMatchStart => try self.emitOp(.AssertMatchStart),
             .AssertForward => {
-                // Positive lookahead: compile inner expression with special markers
-                // Actual implementation needs VM support
-                _ = try self.bytecode.emit(.{ .opcode = .AssertForward });
+                try self.emitOp(.AssertForward);
                 try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{ .opcode = .AssertForwardEnd });
+                try self.emitOp(.AssertForwardEnd);
             },
             .AssertForwardNegative => {
-                // Negative lookahead
-                _ = try self.bytecode.emit(.{ .opcode = .AssertForwardNegative });
+                try self.emitOp(.AssertForwardNegative);
                 try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{ .opcode = .AssertForwardEnd });
+                try self.emitOp(.AssertForwardEnd);
             },
             .AssertBackward => {
-                // Positive lookbehind (simplified implementation)
-                _ = try self.bytecode.emit(.{ .opcode = .AssertBackward });
+                try self.emitOp(.AssertBackward);
                 try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
+                try self.emitOp(.AssertBackwardEnd);
             },
             .AssertBackwardNegative => {
-                // Negative lookbehind (simplified implementation)
-                _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardNegative });
+                try self.emitOp(.AssertBackwardNegative);
                 try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
+                try self.emitOp(.AssertBackwardEnd);
             },
             .InlineFlag => {
                 const old_options = self.options;
@@ -338,9 +308,9 @@ pub const Compiler = struct {
                 }
             },
             .AtomicGroup => {
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
+                try self.emitOp(.AtomicStart);
                 try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
+                try self.emitOp(.AtomicEnd);
             },
             .Conditional => {
                 if (node.condition) |cond| {
@@ -374,32 +344,32 @@ pub const Compiler = struct {
                         .target = undefined,
                     });
 
-                    _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
+                    try self.emitOp(.AtomicStart);
                     switch (cond_type) {
                         .AssertForward => {
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertForward });
+                            try self.emitOp(.AssertForward);
                             try self.compileNode(cond.left.?);
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertForwardEnd });
+                            try self.emitOp(.AssertForwardEnd);
                         },
                         .AssertForwardNegative => {
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertForwardNegative });
+                            try self.emitOp(.AssertForwardNegative);
                             try self.compileNode(cond.left.?);
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertForwardEnd });
+                            try self.emitOp(.AssertForwardEnd);
                         },
                         .AssertBackward => {
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackward });
+                            try self.emitOp(.AssertBackward);
                             try self.compileNode(cond.left.?);
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
+                            try self.emitOp(.AssertBackwardEnd);
                         },
                         .AssertBackwardNegative => {
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardNegative });
+                            try self.emitOp(.AssertBackwardNegative);
                             try self.compileNode(cond.left.?);
-                            _ = try self.bytecode.emit(.{ .opcode = .AssertBackwardEnd });
+                            try self.emitOp(.AssertBackwardEnd);
                         },
                         else => unreachable,
                     }
                     try self.compileNode(yes_node);
-                    _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
+                    try self.emitOp(.AtomicEnd);
                     const jmp_idx = try self.bytecode.emit(.{
                         .opcode = .Jmp,
                         .target = undefined,

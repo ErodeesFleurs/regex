@@ -47,21 +47,16 @@ const Frame = struct {
     subroutine_stack_len: usize = 0,
 };
 
-/// Restore execution state from a backtrack frame in the main exec loop.
-inline fn restoreFromFrame(frame: Frame, captures: *std.ArrayList(?usize), pc: *usize, pos: *usize, options: *RegexOptions) void {
-    pc.* = frame.pc;
-    pos.* = frame.pos;
-    options.* = frame.options;
-    if (frame.capture_slot) |slot| {
-        captures.items[slot] = frame.capture_old_value;
-    }
-    if (frame.paired_capture_slot) |slot| {
-        captures.items[slot] = frame.paired_capture_old_value;
-    }
-}
-
-/// Restore execution state from a backtrack frame in tryMatchSubpattern.
-inline fn restoreSubFrame(frame: Frame, captures: *std.ArrayList(?usize), pc: *usize, pos: *usize, subroutine_stack: *std.ArrayList(usize)) void {
+/// Restore state from a backtrack frame, handling both main and sub-match modes.
+inline fn backtrack(
+    comptime is_sub: bool,
+    frame: Frame,
+    captures: *std.ArrayList(?usize),
+    pc: *usize,
+    pos: *usize,
+    subroutine_stack: *std.ArrayList(usize),
+    options: *RegexOptions,
+) void {
     subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
     pc.* = frame.pc;
     pos.* = frame.pos;
@@ -71,6 +66,135 @@ inline fn restoreSubFrame(frame: Frame, captures: *std.ArrayList(?usize), pc: *u
     if (frame.paired_capture_slot) |slot| {
         captures.items[slot] = frame.paired_capture_old_value;
     }
+    if (!is_sub) {
+        options.* = frame.options;
+    }
+}
+
+/// Match a CharClass instruction at the given position.
+/// Returns the byte length to advance if matched, null otherwise.
+inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_sensitive: bool) ?usize {
+    const ch = if (pos < input.len) input[pos] else 0;
+    var matches = false;
+    var advance_len: usize = 1;
+    const cc = inst.char_class.?.*;
+    const has_ranges = cc.ranges.items.len > 0;
+    const has_posix = cc.posix_classes.items.len > 0;
+    const has_unicode_props = cc.unicode_properties.items.len > 0;
+    const has_unicode_ranges = cc.unicode_ranges.items.len > 0;
+
+    // Check ranges and POSIX classes (ASCII single-byte)
+    if (ch < 128 and (has_ranges or has_posix)) {
+        const range_match = if (case_sensitive)
+            cc.contains(ch)
+        else
+            cc.contains(ch) or cc.contains(std.ascii.toLower(ch)) or cc.contains(std.ascii.toUpper(ch));
+        const posix_match = if (case_sensitive)
+            cc.containsPosixClass(ch)
+        else
+            cc.containsPosixClass(ch) or cc.containsPosixClass(std.ascii.toLower(ch)) or cc.containsPosixClass(std.ascii.toUpper(ch));
+        matches = range_match or posix_match;
+    }
+
+    // Check Unicode ranges (both ASCII and non-ASCII)
+    if (!matches and has_unicode_ranges) {
+        if (ch < 128) {
+            if (cc.containsUnicodeRange(ch)) {
+                matches = true;
+            }
+        } else {
+            const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch 1;
+            if (pos + byte_len <= input.len) {
+                const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch input[pos];
+                if (cc.containsUnicodeRange(cp)) {
+                    matches = true;
+                    advance_len = byte_len;
+                }
+            }
+        }
+    }
+
+    // Check Unicode properties (handles both ASCII and non-ASCII)
+    if (!matches and has_unicode_props) {
+        if (matchUnicodePropertyInClass(input, pos, cc)) |byte_len| {
+            matches = true;
+            advance_len = byte_len;
+        }
+    }
+
+    if (pos < input.len and matches) {
+        return advance_len;
+    }
+    return null;
+}
+
+/// Match a CharUtf8 instruction at the given position.
+/// Returns the byte length to advance if matched, null otherwise.
+inline fn matchCharUtf8(input: []const u8, pos: usize, expected_cp: u21, case_sensitive: bool) ?usize {
+    if (pos >= input.len) return null;
+    const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch return null;
+    if (pos + byte_len > input.len) return null;
+    const cp = std.unicode.utf8Decode(input[pos .. pos + byte_len]) catch return null;
+    const matches = if (case_sensitive)
+        cp == expected_cp
+    else
+        unicode_case.caseInsensitiveEqual(cp, expected_cp);
+    if (matches) return byte_len;
+    return null;
+}
+
+/// Find the end PC of an assert block (lookahead/lookbehind).
+fn findAssertEnd(bytecode: []const Instruction, start_pc: usize) usize {
+    var depth: usize = 1;
+    var end_pc = start_pc;
+    while (end_pc < bytecode.len) : (end_pc += 1) {
+        const inst2 = bytecode[end_pc];
+        switch (inst2.opcode) {
+            .AssertForward, .AssertForwardNegative, .AssertBackward, .AssertBackwardNegative => depth += 1,
+            .AssertForwardEnd, .AssertBackwardEnd => {
+                depth -= 1;
+                if (depth == 0) break;
+            },
+            else => {},
+        }
+    }
+    return end_pc;
+}
+
+/// Match a backref at the given position.
+/// Returns the byte length to advance if matched, null otherwise.
+inline fn matchBackref(input: []const u8, pos: usize, captures: []const ?usize, group_idx: usize, case_sensitive: bool) ?usize {
+    const start_slot = group_idx * 2;
+    const end_slot = group_idx * 2 + 1;
+    if (start_slot >= captures.len or end_slot >= captures.len) return null;
+    const group_start = captures[start_slot];
+    const group_end = captures[end_slot];
+    if (group_start == null or group_end == null) return null;
+    const group_text = input[group_start.?..group_end.?];
+    const remaining = input[pos..];
+    const matches = if (case_sensitive)
+        remaining.len >= group_text.len and std.mem.startsWith(u8, remaining, group_text)
+    else
+        remaining.len >= group_text.len and unicode_case.unicodeEqlIgnoreCase(remaining[0..group_text.len], group_text);
+    if (matches) return group_text.len;
+    return null;
+}
+
+/// Check if position is at a word boundary.
+inline fn checkWordBoundary(input: []const u8, pos: usize) bool {
+    const left = if (pos > 0) isUnicodeWordChar(input, pos - 1) else false;
+    const right = if (pos < input.len) isUnicodeWordChar(input, pos) else false;
+    return left != right;
+}
+
+/// Check assert-start condition (^).
+inline fn checkAssertStart(pos: usize, input: []const u8, multiline: bool) bool {
+    return if (multiline) (pos == 0 or input[pos - 1] == '\n') else (pos == 0);
+}
+
+/// Check assert-end condition ($).
+inline fn checkAssertEnd(pos: usize, input: []const u8, multiline: bool) bool {
+    return if (multiline) (pos == input.len or input[pos] == '\n') else (pos == input.len);
 }
 
 fn isUnicodeProperty(cp: u21, property: []const u8) bool {
@@ -1822,12 +1946,6 @@ fn matchNewline(input: []const u8, pos: usize) ?usize {
     return isLineEndingChar(input, pos);
 }
 
-/// Check if the character at pos is a vertical whitespace character.
-/// Returns the byte length of the character (1 or 3), or null if not vertical whitespace.
-fn isVerticalWhitespace(input: []const u8, pos: usize) ?usize {
-    return isLineEndingChar(input, pos);
-}
-
 fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
     if (pos >= input.len) return null;
 
@@ -1879,539 +1997,401 @@ pub const Vm = struct {
         self.last_pos.deinit(self.allocator);
     }
 
-    /// Try to match within a sub-instruction range, returning the match end position (null on failure).
-    /// Used for independent sub-matching in lookaheads/lookbehinds.
-    fn tryMatchSubpattern(self: *Vm, input: []const u8, start_pc: usize, end_pc: usize, start_pos: usize) !?usize {
-        var sub_pc: usize = start_pc;
-        var sub_pos: usize = start_pos;
-        var sub_matched = false;
-        var sub_match_end: usize = start_pos;
+    /// Shared VM execution engine.
+    fn execInternal(comptime is_sub: bool, self: *Vm, input: []const u8, start_pos: usize, start_pc: usize, end_pc: usize) !MatchResult {
+        var captures: std.ArrayList(?usize) = .empty;
+        try captures.resize(self.allocator, (self.bytecode.num_groups + 1) * 2);
+        @memset(captures.items, null);
+
+        var stack: std.ArrayList(Frame) = .empty;
+        defer stack.deinit(self.allocator);
+
+        var pc: usize = start_pc;
+        var pos: usize = start_pos;
+        var matched = false;
+        var match_end: usize = start_pos;
         var step_counter: usize = 0;
         const max_steps = self.options.max_steps;
 
-        var sub_captures: std.ArrayList(?usize) = .empty;
-        try sub_captures.resize(self.allocator, (self.bytecode.num_groups + 1) * 2);
-        @memset(sub_captures.items, null);
-        defer sub_captures.deinit(self.allocator);
+        if (!is_sub) {
+            try self.last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
+            @memset(self.last_pos.items, null);
+        }
 
-        var sub_stack: std.ArrayList(Frame) = .empty;
-        defer sub_stack.deinit(self.allocator);
+        var subroutine_stack: std.ArrayList(usize) = .empty;
+        defer subroutine_stack.deinit(self.allocator);
 
-        var sub_subroutine_stack: std.ArrayList(usize) = .empty;
-        defer sub_subroutine_stack.deinit(self.allocator);
+        const final_pc = if (is_sub) end_pc else self.bytecode.instructions.items.len;
 
         while (true) {
             if (max_steps) |limit| {
-                if (step_counter >= limit) {
-                    // Step limit exceeded: abort sub-match
-                    break;
-                }
+                if (step_counter >= limit) break;
             }
             step_counter += 1;
 
-            if (sub_pc >= end_pc) {
-                // Reached end of sub-pattern, consider it a match (even if sub_stack has unexplored branches).
-                // Sub-match only needs to prove there exists a successful path from start_pc to end_pc.
-                sub_matched = true;
-                sub_match_end = sub_pos;
-                break;
+            if (pc >= final_pc) {
+                if (is_sub) {
+                    matched = true;
+                    match_end = pos;
+                    break;
+                } else {
+                    if (stack.items.len == 0) break;
+                    const frame = stack.pop().?;
+                    backtrack(false, frame, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    continue;
+                }
             }
 
-            const inst = self.bytecode.instructions.items[sub_pc];
+            const inst = self.bytecode.instructions.items[pc];
 
             switch (inst.opcode) {
                 .Char => {
-                    if (sub_pos < input.len and input[sub_pos] == inst.char.?) {
-                        sub_pc += 1;
-                        sub_pos += 1;
+                    const matches = if (self.options.case_sensitive)
+                        (pos < input.len and input[pos] == inst.char.?)
+                    else
+                        (pos < input.len and unicode_case.caseInsensitiveEqual(input[pos], inst.char.?));
+                    if (matches) {
+                        pc += 1;
+                        pos += 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .CharUtf8 => {
-                    if (sub_pos >= input.len) {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                        continue;
-                    }
-                    const byte_len = std.unicode.utf8ByteSequenceLength(input[sub_pos]) catch {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                        continue;
-                    };
-                    if (sub_pos + byte_len > input.len) {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                        continue;
-                    }
-                    const cp = std.unicode.utf8Decode(input[sub_pos..sub_pos + byte_len]) catch {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                        continue;
-                    };
-                    const expected_cp = inst.char_codepoint.?;
-                    const matches = if (self.options.case_sensitive)
-                        cp == expected_cp
-                    else
-                        unicode_case.caseInsensitiveEqual(cp, expected_cp);
-                    if (matches) {
-                        sub_pc += 1;
-                        sub_pos += byte_len;
+                    if (matchCharUtf8(input, pos, inst.char_codepoint.?, self.options.case_sensitive)) |byte_len| {
+                        pc += 1;
+                        pos += byte_len;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .Any => {
-                    if (sub_pos < input.len) {
-                        sub_pc += 1;
-                        sub_pos += 1;
+                    if (pos < input.len and (self.options.dot_matches_newline or input[pos] != '\n')) {
+                        pc += 1;
+                        pos += 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .CharClass => {
-                    const ch2 = if (sub_pos < input.len) input[sub_pos] else 0;
-                    var sub_matches = false;
-                    var sub_advance_len: usize = 1;
-                    const sub_has_ranges = inst.char_class.?.*.ranges.items.len > 0;
-                    const sub_has_posix = inst.char_class.?.*.posix_classes.items.len > 0;
-                    const sub_has_unicode_props = inst.char_class.?.*.unicode_properties.items.len > 0;
-                    const sub_has_unicode_ranges = inst.char_class.?.*.unicode_ranges.items.len > 0;
-
-                    if (ch2 < 128 and (sub_has_ranges or sub_has_posix)) {
-                        const range_match2 = inst.char_class.?.*.contains(ch2);
-                        const posix_match2 = inst.char_class.?.*.containsPosixClass(ch2);
-                        sub_matches = range_match2 or posix_match2;
-                    }
-
-                    if (!sub_matches and sub_has_unicode_ranges) {
-                        if (ch2 < 128) {
-                            if (inst.char_class.?.*.containsUnicodeRange(ch2)) {
-                                sub_matches = true;
-                            }
-                        } else {
-                            const byte_len = std.unicode.utf8ByteSequenceLength(input[sub_pos]) catch 1;
-                            if (sub_pos + byte_len <= input.len) {
-                                const cp = std.unicode.utf8Decode(input[sub_pos..sub_pos + byte_len]) catch input[sub_pos];
-                                if (inst.char_class.?.*.containsUnicodeRange(cp)) {
-                                    sub_matches = true;
-                                    sub_advance_len = byte_len;
-                                }
-                            }
-                        }
-                    }
-
-                    if (!sub_matches and sub_has_unicode_props) {
-                        if (matchUnicodePropertyInClass(input, sub_pos, inst.char_class.?.*)) |byte_len| {
-                            sub_matches = true;
-                            sub_advance_len = byte_len;
-                        }
-                    }
-
-                    if (sub_pos < input.len and sub_matches) {
-                        sub_pc += 1;
-                        sub_pos += sub_advance_len;
+                    if (matchCharClass(inst, input, pos, self.options.case_sensitive)) |adv| {
+                        pc += 1;
+                        pos += adv;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .UnicodeProperty => {
-                    if (matchUnicodeProperty(input, sub_pos, inst.unicode_property.?, inst.unicode_negated)) |byte_len| {
-                        sub_pc += 1;
-                        sub_pos += byte_len;
+                    if (matchUnicodeProperty(input, pos, inst.unicode_property.?, inst.unicode_negated)) |byte_len| {
+                        pc += 1;
+                        pos += byte_len;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .GraphemeCluster => {
-                    if (matchGraphemeCluster(input, sub_pos)) |byte_len| {
-                        sub_pc += 1;
-                        sub_pos += byte_len;
+                    if (matchGraphemeCluster(input, pos)) |byte_len| {
+                        pc += 1;
+                        pos += byte_len;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .Newline => {
-                    if (matchNewline(input, sub_pos)) |byte_len| {
-                        sub_pc += 1;
-                        sub_pos += byte_len;
+                    if (matchNewline(input, pos)) |byte_len| {
+                        pc += 1;
+                        pos += byte_len;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .ResetMatchStart => {
-                    sub_captures.items[0] = sub_pos;
-                    sub_pc += 1;
+                    captures.items[0] = pos;
+                    pc += 1;
                 },
                 .NotNewline => {
-                    if (sub_pos < input.len and input[sub_pos] != '\n') {
-                        sub_pc += 1;
-                        sub_pos += 1;
+                    if (pos < input.len and input[pos] != '\n') {
+                        pc += 1;
+                        pos += 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .NotVerticalWhitespace => {
-                    if (sub_pos < input.len and isVerticalWhitespace(input, sub_pos) == null) {
-                        sub_pc += 1;
-                        sub_pos += 1;
+                    if (pos < input.len and isLineEndingChar(input, pos) == null) {
+                        pc += 1;
+                        pos += 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .Split => {
-                    try sub_stack.append(self.allocator, .{
+                    if (!is_sub) {
+                        if (self.last_pos.items[pc]) |lp| {
+                            if (lp == pos) {
+                                pc = inst.target.?;
+                                continue;
+                            }
+                        }
+                        self.last_pos.items[pc] = pos;
+                    }
+                    try stack.append(self.allocator, .{
                         .pc = inst.target.?,
-                        .pos = sub_pos,
+                        .pos = pos,
                         .capture_slot = null,
                         .capture_old_value = null,
                         .options = self.options,
-                        .subroutine_stack_len = sub_subroutine_stack.items.len,
+                        .subroutine_stack_len = subroutine_stack.items.len,
                     });
-                    sub_pc += 1;
+                    pc += 1;
                 },
                 .Jmp => {
-                    sub_pc = inst.target.?;
+                    pc = inst.target.?;
                 },
                 .Save => {
                     const slot = inst.save_slot.?;
-                    const old_val = sub_captures.items[slot];
-                    sub_captures.items[slot] = sub_pos;
+                    const old_val = captures.items[slot];
+                    captures.items[slot] = pos;
                     var frame = Frame{
-                        .pc = sub_pc + 1,
-                        .pos = sub_pos,
+                        .pc = pc + 1,
+                        .pos = pos,
                         .capture_slot = slot,
                         .capture_old_value = old_val,
                         .options = self.options,
-                        .subroutine_stack_len = sub_subroutine_stack.items.len,
+                        .subroutine_stack_len = subroutine_stack.items.len,
                     };
-                    // If this is an end slot, also save the paired start slot
                     if (slot % 2 == 1) {
                         const start_slot = slot - 1;
                         frame.paired_capture_slot = start_slot;
-                        frame.paired_capture_old_value = sub_captures.items[start_slot];
+                        frame.paired_capture_old_value = captures.items[start_slot];
                     }
-                    try sub_stack.append(self.allocator, frame);
-                    sub_pc += 1;
+                    try stack.append(self.allocator, frame);
+                    pc += 1;
                 },
                 .Match => {
-                    sub_matched = true;
-                    sub_match_end = sub_pos;
+                    matched = true;
+                    match_end = pos;
+                    if (!is_sub) {
+                        if (captures.items[0] == null) captures.items[0] = start_pos;
+                        captures.items[1] = pos;
+                    }
                     break;
-                },
-                .AssertStart => {
-                    const at_start = if (self.options.multiline)
-                        (sub_pos == 0 or input[sub_pos - 1] == '\n')
-                    else
-                        (sub_pos == 0);
-                    if (at_start) {
-                        sub_pc += 1;
-                    } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                    }
-                },
-                .AssertEnd => {
-                    const at_end = if (self.options.multiline)
-                        (sub_pos == input.len or input[sub_pos] == '\n')
-                    else
-                        (sub_pos == input.len);
-                    if (at_end) {
-                        sub_pc += 1;
-                    } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                    }
-                },
-                .AssertStringStart => {
-                    if (sub_pos == 0) {
-                        sub_pc += 1;
-                    } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                    }
-                },
-                .AssertStringEnd => {
-                    if (sub_pos == input.len) {
-                        sub_pc += 1;
-                    } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                    }
-                },
-                .AssertStringEndAllowNewline => {
-                    if (sub_pos == input.len or (sub_pos + 1 == input.len and input[sub_pos] == '\n')) {
-                        sub_pc += 1;
-                    } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                    }
-                },
-                .AssertMatchStart => {
-                    if (sub_pos == self.last_match_end) {
-                        sub_pc += 1;
-                    } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                    }
                 },
                 .SetOption => {
                     self.options = inst.options.?;
-                    sub_pc += 1;
+                    pc += 1;
                 },
                 .AtomicStart => {
-                    // Record current stack depth; branches pushed inside atomic group will be truncated when AtomicEnd is reached
-                    try self.atomic_stack.append(self.allocator, sub_stack.items.len);
-                    sub_pc += 1;
+                    try self.atomic_stack.append(self.allocator, stack.items.len);
+                    pc += 1;
                 },
                 .AtomicEnd => {
-                    // Atomic group end: truncate stack to depth at atomic group start, forbidding backtracking into the group
                     if (self.atomic_stack.items.len > 0) {
                         const depth = self.atomic_stack.pop().?;
-                        while (sub_stack.items.len > depth) {
-                            _ = sub_stack.pop();
+                        while (stack.items.len > depth) {
+                            _ = stack.pop();
                         }
                     }
-                    sub_pc += 1;
+                    pc += 1;
                 },
                 .Conditional => {
                     const group_idx = inst.backref_group.?;
                     const start_slot = group_idx * 2;
                     const end_slot = group_idx * 2 + 1;
                     var condition_met = false;
-                    if (start_slot < sub_captures.items.len and end_slot < sub_captures.items.len) {
-                        const group_start = sub_captures.items[start_slot];
-                        const group_end = sub_captures.items[end_slot];
+                    if (start_slot < captures.items.len and end_slot < captures.items.len) {
+                        const group_start = captures.items[start_slot];
+                        const group_end = captures.items[end_slot];
                         condition_met = group_start != null and group_end != null;
                     }
                     if (condition_met) {
-                        sub_pc += 1;
+                        pc += 1;
                     } else {
-                        sub_pc = inst.target.?;
+                        pc = inst.target.?;
                     }
                 },
                 .Backref => {
-                    const group_idx = inst.backref_group.?;
-                    const start_slot = group_idx * 2;
-                    const end_slot = group_idx * 2 + 1;
-                    if (start_slot >= sub_captures.items.len or end_slot >= sub_captures.items.len) {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                        continue;
-                    }
-                    const group_start = sub_captures.items[start_slot];
-                    const group_end = sub_captures.items[end_slot];
-                    if (group_start == null or group_end == null) {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
-                        continue;
-                    }
-                    const group_text = input[group_start.?..group_end.?];
-                    const remaining = input[sub_pos..];
-                    const matches = if (self.options.case_sensitive)
-                        remaining.len >= group_text.len and std.mem.startsWith(u8, remaining, group_text)
-                    else
-                        remaining.len >= group_text.len and unicode_case.unicodeEqlIgnoreCase(remaining[0..group_text.len], group_text);
-                    if (matches) {
-                        sub_pc += 1;
-                        sub_pos += group_text.len;
+                    if (matchBackref(input, pos, captures.items, inst.backref_group.?, self.options.case_sensitive)) |len| {
+                        pc += 1;
+                        pos += len;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .WordBoundary => {
-                    const left = if (sub_pos > 0) isUnicodeWordChar(input, sub_pos - 1) else false;
-                    const right = if (sub_pos < input.len) isUnicodeWordChar(input, sub_pos) else false;
-                    if (left != right) {
-                        sub_pc += 1;
+                    if (checkWordBoundary(input, pos)) {
+                        pc += 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .NotWordBoundary => {
-                    const left = if (sub_pos > 0) isUnicodeWordChar(input, sub_pos - 1) else false;
-                    const right = if (sub_pos < input.len) isUnicodeWordChar(input, sub_pos) else false;
-                    if (left == right) {
-                        sub_pc += 1;
+                    if (!checkWordBoundary(input, pos)) {
+                        pc += 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    }
+                },
+                .AssertStart => {
+                    if (checkAssertStart(pos, input, self.options.multiline)) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    }
+                },
+                .AssertEnd => {
+                    if (checkAssertEnd(pos, input, self.options.multiline)) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    }
+                },
+                .AssertStringStart => {
+                    if (pos == 0) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    }
+                },
+                .AssertStringEnd => {
+                    if (pos == input.len) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    }
+                },
+                .AssertStringEndAllowNewline => {
+                    if (pos == input.len or (pos + 1 == input.len and input[pos] == '\n')) {
+                        pc += 1;
+                    } else {
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    }
+                },
+                .AssertMatchStart => {
+                    if (is_sub) {
+                        pc += 1;
+                    } else {
+                        if (pos == self.last_match_end) {
+                            pc += 1;
+                        } else {
+                            if (stack.items.len == 0) break;
+                            backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                        }
                     }
                 },
                 .AssertForward => {
-                    var depth: usize = 1;
-                    var end_pc2 = sub_pc + 1;
-                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc2];
-                        switch (inst2.opcode) {
-                            .AssertForward => depth += 1,
-                            .AssertForwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
-                    const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, sub_pos);
-                    if (sub_end != null) {
-                        sub_pc = end_pc2 + 1;
+                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                    var sub_result = try execInternal(true, self, input, pos, pc + 1, epc);
+                    defer sub_result.deinit();
+                    if (sub_result.matched) {
+                        pc = epc + 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .AssertForwardNegative => {
-                    var depth: usize = 1;
-                    var end_pc2 = sub_pc + 1;
-                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc2];
-                        switch (inst2.opcode) {
-                            .AssertForwardNegative => depth += 1,
-                            .AssertForwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
-                    const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, sub_pos);
-                    if (sub_end == null) {
-                        sub_pc = end_pc2 + 1;
+                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                    var sub_result = try execInternal(true, self, input, pos, pc + 1, epc);
+                    defer sub_result.deinit();
+                    if (!sub_result.matched) {
+                        pc = epc + 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .AssertForwardEnd => {
-                    sub_pc += 1;
+                    pc += 1;
                 },
                 .AssertBackward => {
-                    var depth: usize = 1;
-                    var end_pc2 = sub_pc + 1;
-                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc2];
-                        switch (inst2.opcode) {
-                            .AssertBackward => depth += 1,
-                            .AssertBackwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
+                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
                     var success = false;
                     var try_pos: usize = 0;
-                    while (try_pos <= sub_pos) : (try_pos += 1) {
-                        const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, try_pos);
-                        if (sub_end) |se| {
-                            if (se == sub_pos) {
+                    while (try_pos <= pos) : (try_pos += 1) {
+                        var sub_result = try execInternal(true, self, input, try_pos, pc + 1, epc);
+                        defer sub_result.deinit();
+                        if (sub_result.matched) {
+                            if (sub_result.end == pos) {
                                 success = true;
                                 break;
                             }
                         }
                     }
                     if (success) {
-                        sub_pc = end_pc2 + 1;
+                        pc = epc + 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .AssertBackwardNegative => {
-                    var depth: usize = 1;
-                    var end_pc2 = sub_pc + 1;
-                    while (end_pc2 < self.bytecode.instructions.items.len) : (end_pc2 += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc2];
-                        switch (inst2.opcode) {
-                            .AssertBackwardNegative => depth += 1,
-                            .AssertBackwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
+                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
                     var success = true;
                     var try_pos: usize = 0;
-                    while (try_pos <= sub_pos) : (try_pos += 1) {
-                        const sub_end = try self.tryMatchSubpattern(input, sub_pc + 1, end_pc2, try_pos);
-                        if (sub_end) |se| {
-                            if (se == sub_pos) {
+                    while (try_pos <= pos) : (try_pos += 1) {
+                        var sub_result = try execInternal(true, self, input, try_pos, pc + 1, epc);
+                        defer sub_result.deinit();
+                        if (sub_result.matched) {
+                            if (sub_result.end == pos) {
                                 success = false;
                                 break;
                             }
                         }
                     }
                     if (success) {
-                        sub_pc = end_pc2 + 1;
+                        pc = epc + 1;
                     } else {
-                        if (sub_stack.items.len == 0) break;
-                        const frame = sub_stack.pop().?;
-                        restoreSubFrame(frame, &sub_captures, &sub_pc, &sub_pos, &sub_subroutine_stack);
+                        if (stack.items.len == 0) break;
+                        backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
                     }
                 },
                 .AssertBackwardEnd => {
-                    sub_pc += 1;
+                    pc += 1;
                 },
                 .SubroutineCall => {
-                    if (inst.target.? != sub_pc + 1) {
-                        try sub_subroutine_stack.append(self.allocator, sub_pc + 1);
+                    if (inst.target.? != pc + 1) {
+                        try subroutine_stack.append(self.allocator, pc + 1);
                     }
-                    sub_pc = inst.target.?;
+                    pc = inst.target.?;
                 },
                 .SubroutineReturn => {
-                    if (sub_subroutine_stack.items.len > 0) {
-                        sub_pc = sub_subroutine_stack.pop().?;
+                    if (subroutine_stack.items.len > 0) {
+                        pc = subroutine_stack.pop().?;
                     } else {
-                        sub_pc += 1;
+                        pc += 1;
                     }
                 },
             }
         }
 
-        if (sub_matched) {
-            return sub_match_end;
-        }
-        return null;
+        return MatchResult{
+            .matched = matched,
+            .captures = captures,
+            .start = if (captures.items[0]) |s| s else start_pos,
+            .end = match_end,
+            .allocator = self.allocator,
+        };
     }
+
+
 
     pub fn match(self: *Vm, input: []const u8) !bool {
         var result = try self.exec(input, 0);
@@ -2466,580 +2446,7 @@ pub const Vm = struct {
     }
 
     pub fn exec(self: *Vm, input: []const u8, start_pos: usize) !MatchResult {
-        var captures: std.ArrayList(?usize) = .empty;
-        try captures.resize(self.allocator, (self.bytecode.num_groups + 1) * 2);
-        @memset(captures.items, null);
-
-        var stack: std.ArrayList(Frame) = .empty;
-        defer stack.deinit(self.allocator);
-
-        var pc: usize = 0;
-        var pos: usize = start_pos;
-        var matched = false;
-        var match_end: usize = start_pos;
-        var step_counter: usize = 0;
-        const max_steps = self.options.max_steps;
-
-        try self.last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
-        @memset(self.last_pos.items, null);
-
-        var subroutine_stack: std.ArrayList(usize) = .empty;
-        defer subroutine_stack.deinit(self.allocator);
-
-        while (true) {
-            if (max_steps) |limit| {
-                if (step_counter >= limit) {
-                    // Step limit exceeded: abort match
-                    break;
-                }
-            }
-            step_counter += 1;
-
-            if (pc >= self.bytecode.instructions.items.len) {
-                // backtrack
-                if (stack.items.len == 0) break;
-                const frame = stack.pop().?;
-                subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
-                restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                continue;
-            }
-
-            const inst = self.bytecode.instructions.items[pc];
-
-            switch (inst.opcode) {
-                .Char => {
-                    const matches = if (self.options.case_sensitive)
-                        (pos < input.len and input[pos] == inst.char.?)
-                    else
-                        (pos < input.len and unicode_case.caseInsensitiveEqual(input[pos], inst.char.?));
-                    if (matches) {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        // backtrack
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .CharUtf8 => {
-                    if (pos >= input.len) {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                        continue;
-                    }
-                    const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                        continue;
-                    };
-                    if (pos + byte_len > input.len) {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                        continue;
-                    }
-                    const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                        continue;
-                    };
-                    const expected_cp = inst.char_codepoint.?;
-                    const matches = if (self.options.case_sensitive)
-                        cp == expected_cp
-                    else
-                        unicode_case.caseInsensitiveEqual(cp, expected_cp);
-                    if (matches) {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .Any => {
-                    if (pos < input.len and (self.options.dot_matches_newline or input[pos] != '\n')) {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .CharClass => {
-                    const ch = if (pos < input.len) input[pos] else 0;
-                    var matches = false;
-                    var advance_len: usize = 1;
-                    const has_ranges = inst.char_class.?.*.ranges.items.len > 0;
-                    const has_posix = inst.char_class.?.*.posix_classes.items.len > 0;
-                    const has_unicode_props = inst.char_class.?.*.unicode_properties.items.len > 0;
-                    const has_unicode_ranges = inst.char_class.?.*.unicode_ranges.items.len > 0;
-
-                    // Check ranges and POSIX classes (ASCII single-byte)
-                    if (ch < 128 and (has_ranges or has_posix)) {
-                        const range_match = if (self.options.case_sensitive)
-                            inst.char_class.?.*.contains(ch)
-                        else
-                            inst.char_class.?.*.contains(ch) or
-                                inst.char_class.?.*.contains(std.ascii.toLower(ch)) or
-                                inst.char_class.?.*.contains(std.ascii.toUpper(ch));
-                        const posix_match = if (self.options.case_sensitive)
-                            inst.char_class.?.*.containsPosixClass(ch)
-                        else
-                            inst.char_class.?.*.containsPosixClass(ch) or
-                                inst.char_class.?.*.containsPosixClass(std.ascii.toLower(ch)) or
-                                inst.char_class.?.*.containsPosixClass(std.ascii.toUpper(ch));
-                        matches = range_match or posix_match;
-                    }
-
-                    // Check Unicode ranges (both ASCII and non-ASCII)
-                    if (!matches and has_unicode_ranges) {
-                        if (ch < 128) {
-                            if (inst.char_class.?.*.containsUnicodeRange(ch)) {
-                                matches = true;
-                            }
-                        } else {
-                            const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch 1;
-                            if (pos + byte_len <= input.len) {
-                                const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch input[pos];
-                                if (inst.char_class.?.*.containsUnicodeRange(cp)) {
-                                    matches = true;
-                                    advance_len = byte_len;
-                                }
-                            }
-                        }
-                    }
-
-                    // Check Unicode properties (handles both ASCII and non-ASCII)
-                    if (!matches and has_unicode_props) {
-                        if (matchUnicodePropertyInClass(input, pos, inst.char_class.?.*)) |byte_len| {
-                            matches = true;
-                            advance_len = byte_len;
-                        }
-                    }
-
-                    if (pos < input.len and matches) {
-                        pc += 1;
-                        pos += advance_len;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .UnicodeProperty => {
-                    if (matchUnicodeProperty(input, pos, inst.unicode_property.?, inst.unicode_negated)) |byte_len| {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .GraphemeCluster => {
-                    if (matchGraphemeCluster(input, pos)) |byte_len| {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .Newline => {
-                    if (matchNewline(input, pos)) |byte_len| {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .ResetMatchStart => {
-                    captures.items[0] = pos;
-                    pc += 1;
-                },
-                .NotNewline => {
-                    // \N matches any character except newline (\n). Default newline = \n.
-                    if (pos < input.len and input[pos] != '\n') {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .NotVerticalWhitespace => {
-                    // \V matches any character except vertical whitespace.
-                    if (pos < input.len and isVerticalWhitespace(input, pos) == null) {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .Split => {
-                    // Zero-length loop detection
-                    if (self.last_pos.items[pc]) |lp| {
-                        if (lp == pos) {
-                            // Prevent infinite loop: if pos didn't advance, skip main branch pc+1 and execute alternate target
-                            pc = inst.target.?;
-                            continue;
-                        }
-                    }
-                    self.last_pos.items[pc] = pos;
-                    // Push target (alternate branch), execute pc+1 (main branch)
-                    try stack.append(self.allocator, .{
-                        .pc = inst.target.?,
-                        .pos = pos,
-                        .capture_slot = null,
-                        .capture_old_value = null,
-                        .options = self.options,
-                        .subroutine_stack_len = subroutine_stack.items.len,
-                    });
-                    pc += 1;
-                },
-                .Jmp => {
-                    pc = inst.target.?;
-                },
-                .Save => {
-                    const slot = inst.save_slot.?;
-                    const old_val = captures.items[slot];
-                    captures.items[slot] = pos;
-
-                    var frame = Frame{
-                        .pc = pc + 1,
-                        .pos = pos,
-                        .capture_slot = slot,
-                        .capture_old_value = old_val,
-                        .options = self.options,
-                        .subroutine_stack_len = subroutine_stack.items.len,
-                    };
-                    // If this is an end slot, also save the paired start slot
-                    if (slot % 2 == 1) {
-                        const start_slot = slot - 1;
-                        frame.paired_capture_slot = start_slot;
-                        frame.paired_capture_old_value = captures.items[start_slot];
-                    }
-                    try stack.append(self.allocator, frame);
-                    pc += 1;
-                },
-                .Match => {
-                    matched = true;
-                    match_end = pos;
-                    if (captures.items[0] == null) {
-                        captures.items[0] = start_pos;
-                    }
-                    captures.items[1] = pos;
-                    break;
-                },
-                .SetOption => {
-                    self.options = inst.options.?;
-                    pc += 1;
-                },
-                .AtomicStart => {
-                    try self.atomic_stack.append(self.allocator, stack.items.len);
-                    pc += 1;
-                },
-                .AtomicEnd => {
-                    if (self.atomic_stack.items.len > 0) {
-                        const depth = self.atomic_stack.pop().?;
-                        while (stack.items.len > depth) {
-                            _ = stack.pop();
-                        }
-                    }
-                    pc += 1;
-                },
-                .Conditional => {
-                    const group_idx = inst.backref_group.?;
-                    const start_slot = group_idx * 2;
-                    const end_slot = group_idx * 2 + 1;
-                    var condition_met = false;
-                    if (start_slot < captures.items.len and end_slot < captures.items.len) {
-                        const group_start = captures.items[start_slot];
-                        const group_end = captures.items[end_slot];
-                        condition_met = group_start != null and group_end != null;
-                    }
-                    if (condition_met) {
-                        pc += 1;
-                    } else {
-                        pc = inst.target.?;
-                    }
-                },
-                .Backref => {
-                    const group_idx = inst.backref_group.?;
-                    const start_slot = group_idx * 2;
-                    const end_slot = group_idx * 2 + 1;
-                    if (start_slot >= captures.items.len or end_slot >= captures.items.len) {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                        continue;
-                    }
-                    const group_start = captures.items[start_slot];
-                    const group_end = captures.items[end_slot];
-                    if (group_start == null or group_end == null) {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                        continue;
-                    }
-                    const group_text = input[group_start.?..group_end.?];
-                    const remaining = input[pos..];
-                    const matches = if (self.options.case_sensitive)
-                        remaining.len >= group_text.len and std.mem.startsWith(u8, remaining, group_text)
-                    else
-                        remaining.len >= group_text.len and unicode_case.unicodeEqlIgnoreCase(remaining[0..group_text.len], group_text);
-                    if (matches) {
-                        pc += 1;
-                        pos += group_text.len;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .WordBoundary => {
-                    const left = if (pos > 0) isUnicodeWordChar(input, pos - 1) else false;
-                    const right = if (pos < input.len) isUnicodeWordChar(input, pos) else false;
-                    if (left != right) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .NotWordBoundary => {
-                    const left = if (pos > 0) isUnicodeWordChar(input, pos - 1) else false;
-                    const right = if (pos < input.len) isUnicodeWordChar(input, pos) else false;
-                    if (left == right) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertStart => {
-                    const at_start = if (self.options.multiline)
-                        (pos == 0 or input[pos - 1] == '\n')
-                    else
-                        (pos == 0);
-                    if (at_start) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertEnd => {
-                    const at_end = if (self.options.multiline)
-                        (pos == input.len or input[pos] == '\n')
-                    else
-                        (pos == input.len);
-                    if (at_end) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertStringStart => {
-                    if (pos == 0) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertStringEnd => {
-                    if (pos == input.len) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertStringEndAllowNewline => {
-                    if (pos == input.len or (pos + 1 == input.len and input[pos] == '\n')) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertMatchStart => {
-                    if (pos == self.last_match_end) {
-                        pc += 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertForward => {
-                    var depth: usize = 1;
-                    var end_pc = pc + 1;
-                    while (end_pc < self.bytecode.instructions.items.len) : (end_pc += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc];
-                        switch (inst2.opcode) {
-                            .AssertForward => depth += 1,
-                            .AssertForwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
-
-                    const sub_end = try self.tryMatchSubpattern(input, pc + 1, end_pc, pos);
-                    if (sub_end != null) {
-                        pc = end_pc + 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertForwardNegative => {
-                    var depth: usize = 1;
-                    var end_pc = pc + 1;
-                    while (end_pc < self.bytecode.instructions.items.len) : (end_pc += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc];
-                        switch (inst2.opcode) {
-                            .AssertForwardNegative => depth += 1,
-                            .AssertForwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
-
-                    const sub_end = try self.tryMatchSubpattern(input, pc + 1, end_pc, pos);
-                    if (sub_end == null) {
-                        pc = end_pc + 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertForwardEnd => {
-                    pc += 1;
-                },
-                .AssertBackward => {
-                    var depth: usize = 1;
-                    var end_pc = pc + 1;
-                    while (end_pc < self.bytecode.instructions.items.len) : (end_pc += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc];
-                        switch (inst2.opcode) {
-                            .AssertBackward => depth += 1,
-                            .AssertBackwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
-
-                    var success = false;
-                    var try_pos: usize = 0;
-                    while (try_pos <= pos) : (try_pos += 1) {
-                        const sub_end = try self.tryMatchSubpattern(input, pc + 1, end_pc, try_pos);
-                        if (sub_end) |se| {
-                            if (se == pos) {
-                                success = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (success) {
-                        pc = end_pc + 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertBackwardNegative => {
-                    var depth: usize = 1;
-                    var end_pc = pc + 1;
-                    while (end_pc < self.bytecode.instructions.items.len) : (end_pc += 1) {
-                        const inst2 = self.bytecode.instructions.items[end_pc];
-                        switch (inst2.opcode) {
-                            .AssertBackwardNegative => depth += 1,
-                            .AssertBackwardEnd => {
-                                depth -= 1;
-                                if (depth == 0) break;
-                            },
-                            else => {},
-                        }
-                    }
-
-                    var success = true;
-                    var try_pos: usize = 0;
-                    while (try_pos <= pos) : (try_pos += 1) {
-                        const sub_end = try self.tryMatchSubpattern(input, pc + 1, end_pc, try_pos);
-                        if (sub_end) |se| {
-                            if (se == pos) {
-                                success = false;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (success) {
-                        pc = end_pc + 1;
-                    } else {
-                        if (stack.items.len == 0) break;
-                        const frame = stack.pop().?;
-                        restoreFromFrame(frame, &captures, &pc, &pos, &self.options);
-                    }
-                },
-                .AssertBackwardEnd => {
-                    pc += 1;
-                },
-                .SubroutineCall => {
-                    if (inst.target.? != pc + 1) {
-                        try subroutine_stack.append(self.allocator, pc + 1);
-                    }
-                    pc = inst.target.?;
-                },
-                .SubroutineReturn => {
-                    if (subroutine_stack.items.len > 0) {
-                        pc = subroutine_stack.pop().?;
-                    } else {
-                        pc += 1;
-                    }
-                },
-            }
-        }
-
-        return MatchResult{
-            .matched = matched,
-            .captures = captures,
-            .start = if (captures.items[0]) |s| s else start_pos,
-            .end = match_end,
-            .allocator = self.allocator,
-        };
+        return execInternal(false, self, input, start_pos, 0, self.bytecode.instructions.items.len);
     }
 };
 

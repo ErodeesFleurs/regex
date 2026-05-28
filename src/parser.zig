@@ -280,9 +280,13 @@ pub const Parser = struct {
     }
 
     fn createEmptyNode(self: *Parser) !*AstNode {
+        return try self.createSimpleNode(.Empty);
+    }
+
+    fn createSimpleNode(self: *Parser, node_type: NodeType) !*AstNode {
         const node = try self.allocator.create(AstNode);
         node.* = .{
-            .type = .Empty,
+            .type = node_type,
             .value = null,
             .left = null,
             .right = null,
@@ -793,146 +797,47 @@ pub const Parser = struct {
             },
             .GraphemeCluster => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .GraphemeCluster,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.GraphemeCluster);
             },
             .Newline => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .Newline,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.Newline);
             },
             .ResetMatchStart => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .ResetMatchStart,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.ResetMatchStart);
             },
             .NotNewline => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .NotNewline,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.NotNewline);
             },
             .NotVerticalWhitespace => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .NotVerticalWhitespace,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.NotVerticalWhitespace);
             },
             .Caret => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .AssertStart,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.AssertStart);
             },
             .Dollar => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .AssertEnd,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.AssertEnd);
             },
             .AssertStringStart => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .AssertStringStart,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.AssertStringStart);
             },
             .AssertStringEnd => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .AssertStringEnd,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.AssertStringEnd);
             },
             .AssertStringEndAllowNewline => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .AssertStringEndAllowNewline,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.AssertStringEndAllowNewline);
             },
             .AssertMatchStart => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .AssertMatchStart,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createSimpleNode(.AssertMatchStart);
             },
             else => return null,
         }
