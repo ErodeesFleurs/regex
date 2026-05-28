@@ -189,11 +189,7 @@ pub const Tokenizer = struct {
                         }
                         if (hex_end < self.input.len and self.input[hex_end] == '}' and hex_end > self.position + 2) {
                             self.position = hex_end + 1;
-                            return .{
-                                .type = .Literal,
-                                .value = self.input[start_pos..self.position],
-                                .position = start_pos,
-                            };
+                            return self.makeToken(.Literal, start_pos);
                         }
                         return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
                     }
@@ -202,11 +198,7 @@ pub const Tokenizer = struct {
                         std.ascii.isHex(self.input[self.position + 2]))
                     {
                         self.position += 3;
-                        return .{
-                            .type = .Literal,
-                            .value = self.input[start_pos..self.position],
-                            .position = start_pos,
-                        };
+                        return self.makeToken(.Literal, start_pos);
                     }
                     return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
                 }
@@ -221,11 +213,7 @@ pub const Tokenizer = struct {
                     }
                     if (hex_end < self.input.len and self.input[hex_end] == '}' and hex_end > self.position + 2) {
                         self.position = hex_end + 1;
-                        return .{
-                            .type = .Literal,
-                            .value = self.input[start_pos..self.position],
-                            .position = start_pos,
-                        };
+                        return self.makeToken(.Literal, start_pos);
                     }
                     return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
                 }
@@ -236,11 +224,7 @@ pub const Tokenizer = struct {
                     std.ascii.isHex(self.input[self.position + 4]))
                 {
                     self.position += 5;
-                    return .{
-                        .type = .Literal,
-                        .value = self.input[start_pos..self.position],
-                        .position = start_pos,
-                    };
+                    return self.makeToken(.Literal, start_pos);
                 }
                 return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
             }
@@ -250,20 +234,12 @@ pub const Tokenizer = struct {
             // Control character: \cX where X is any character
             if (next_ch == 'c' and self.position < self.input.len) {
                 self.position += 1; // consume control character
-                return .{
-                    .type = .Literal,
-                    .value = self.input[start_pos..self.position],
-                    .position = start_pos,
-                };
+                return self.makeToken(.Literal, start_pos);
             }
 
             // Null character: \0
             if (next_ch == '0') {
-                return .{
-                    .type = .Literal,
-                    .value = self.input[start_pos..self.position],
-                    .position = start_pos,
-                };
+                return self.makeToken(.Literal, start_pos);
             }
 
             // Octal escape: \o{NNN}
@@ -276,11 +252,7 @@ pub const Tokenizer = struct {
                     }
                     if (oct_end < self.input.len and self.input[oct_end] == '}' and oct_end > oct_start) {
                         self.position = oct_end + 1;
-                        return .{
-                            .type = .Literal,
-                            .value = self.input[start_pos..self.position],
-                            .position = start_pos,
-                        };
+                        return self.makeToken(.Literal, start_pos);
                     }
                 }
                 return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
@@ -307,11 +279,7 @@ pub const Tokenizer = struct {
                             }
                             if (valid_hex) {
                                 self.position = name_end + 1;
-                                return .{
-                                    .type = .Literal,
-                                    .value = self.input[start_pos..self.position],
-                                    .position = start_pos,
-                                };
+                                return self.makeToken(.Literal, start_pos);
                             }
                         }
                     }
