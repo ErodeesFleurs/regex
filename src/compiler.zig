@@ -159,91 +159,12 @@ pub const Compiler = struct {
                 const end_pos = self.bytecode.getPC();
                 self.bytecode.patch(jmp_idx, end_pos);
             },
-            .Star => {
-                // Greedy: Split after, operand, Jmp Split
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{
-                    .opcode = .Jmp,
-                    .target = split_idx,
-                });
-                const after_loop = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, after_loop);
-            },
-            .LazyStar => {
-                // Lazy: Split operand, Jmp after, operand, Jmp Split
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                const jmp_idx = try self.bytecode.emit(.{
-                    .opcode = .Jmp,
-                    .target = undefined,
-                });
-                const operand_start = self.bytecode.getPC();
-                try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{
-                    .opcode = .Jmp,
-                    .target = split_idx,
-                });
-                const after_loop = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, operand_start);
-                self.bytecode.patch(jmp_idx, after_loop);
-            },
-            .Plus => {
-                // Greedy: operand, Split after, Jmp operand
-                const operand_start = self.bytecode.getPC();
-                try self.compileNode(node.left.?);
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                _ = try self.bytecode.emit(.{
-                    .opcode = .Jmp,
-                    .target = operand_start,
-                });
-                const after_loop = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, after_loop);
-            },
-            .LazyPlus => {
-                // Lazy: operand, Split operand
-                const operand_start = self.bytecode.getPC();
-                try self.compileNode(node.left.?);
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                self.bytecode.patch(split_idx, operand_start);
-            },
-            .Question => {
-                // Greedy: Split after, operand
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                try self.compileNode(node.left.?);
-                const after_operand = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, after_operand);
-            },
-            .LazyQuestion => {
-                // Lazy: Split operand, Jmp after, operand
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                const jmp_idx = try self.bytecode.emit(.{
-                    .opcode = .Jmp,
-                    .target = undefined,
-                });
-                const operand_start = self.bytecode.getPC();
-                try self.compileNode(node.left.?);
-                const after_operand = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, operand_start);
-                self.bytecode.patch(jmp_idx, after_operand);
-            },
+            .Star => try self.emitLoop(node.left.?, 0, null, false),
+            .LazyStar => try self.emitLoop(node.left.?, 0, null, true),
+            .Plus => try self.emitLoop(node.left.?, 1, null, false),
+            .LazyPlus => try self.emitLoop(node.left.?, 1, null, true),
+            .Question => try self.emitLoop(node.left.?, 0, 1, false),
+            .LazyQuestion => try self.emitLoop(node.left.?, 0, 1, true),
             .Group => {
                 if (node.group_index) |group_idx| {
                     // Capturing group: emit Save instructions
@@ -282,47 +203,18 @@ pub const Compiler = struct {
                 try self.compileQuantifier(node, true);
             },
             .PossessiveStar => {
-                // a*+ is equivalent to (?>a*)
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
-                const loop_start = self.bytecode.getPC();
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                try self.compileNode(node.left.?);
-                _ = try self.bytecode.emit(.{
-                    .opcode = .Jmp,
-                    .target = loop_start,
-                });
-                const end_pos = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, end_pos);
+                try self.emitLoop(node.left.?, 0, null, false);
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
             },
             .PossessivePlus => {
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
-                const operand_start = self.bytecode.getPC();
-                try self.compileNode(node.left.?);
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                _ = try self.bytecode.emit(.{
-                    .opcode = .Jmp,
-                    .target = operand_start,
-                });
-                const end_pos = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, end_pos);
+                try self.emitLoop(node.left.?, 1, null, false);
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
             },
             .PossessiveQuestion => {
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicStart });
-                const split_idx = try self.bytecode.emit(.{
-                    .opcode = .Split,
-                    .target = undefined,
-                });
-                try self.compileNode(node.left.?);
-                const end_pos = self.bytecode.getPC();
-                self.bytecode.patch(split_idx, end_pos);
+                try self.emitLoop(node.left.?, 0, 1, false);
                 _ = try self.bytecode.emit(.{ .opcode = .AtomicEnd });
             },
             .PossessiveQuantifier => {
@@ -581,10 +473,17 @@ pub const Compiler = struct {
     fn compileQuantifier(self: *Compiler, node: *AstNode, lazy: bool) error{OutOfMemory}!void {
         const min = node.value.?;
         const max = node.group_index; // reuse group_index field to store max
+        try self.emitLoop(node.left.?, min, max, lazy);
+    }
 
+    /// Emit loop bytecode for quantifier-like constructs.
+    /// min: minimum repetitions (e.g. 0 for Star, 1 for Plus)
+    /// max: maximum repetitions (null for infinite)
+    /// lazy: true for lazy matching
+    fn emitLoop(self: *Compiler, operand: *AstNode, min: usize, max: ?usize, lazy: bool) error{OutOfMemory}!void {
         // Emit min required matches
         for (0..min) |_| {
-            try self.compileNode(node.left.?);
+            try self.compileNode(operand);
         }
 
         // If there is a max, emit additional optional matches
@@ -600,12 +499,12 @@ pub const Compiler = struct {
                         .target = undefined,
                     });
                     const operand_start = self.bytecode.getPC();
-                    try self.compileNode(node.left.?);
+                    try self.compileNode(operand);
                     const end_pos = self.bytecode.getPC();
                     self.bytecode.patch(split_idx, operand_start);
                     self.bytecode.patch(jmp_idx, end_pos);
                 } else {
-                    try self.compileNode(node.left.?);
+                    try self.compileNode(operand);
                     const end_pos = self.bytecode.getPC();
                     self.bytecode.patch(split_idx, end_pos);
                 }
@@ -623,7 +522,7 @@ pub const Compiler = struct {
                     .target = undefined,
                 });
                 const operand_start = self.bytecode.getPC();
-                try self.compileNode(node.left.?);
+                try self.compileNode(operand);
                 _ = try self.bytecode.emit(.{
                     .opcode = .Jmp,
                     .target = loop_start,
@@ -632,7 +531,7 @@ pub const Compiler = struct {
                 self.bytecode.patch(split_idx, operand_start);
                 self.bytecode.patch(jmp_idx, end_pos);
             } else {
-                try self.compileNode(node.left.?);
+                try self.compileNode(operand);
                 _ = try self.bytecode.emit(.{
                     .opcode = .Jmp,
                     .target = loop_start,

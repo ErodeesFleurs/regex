@@ -1861,6 +1861,7 @@ pub const Vm = struct {
     options: RegexOptions,
     atomic_stack: std.ArrayList(usize) = .empty,
     last_match_end: usize = 0,
+    last_pos: std.ArrayList(?usize) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, bytecode: Bytecode, options: RegexOptions) Vm {
         return .{
@@ -1869,11 +1870,13 @@ pub const Vm = struct {
             .options = options,
             .atomic_stack = .empty,
             .last_match_end = 0,
+            .last_pos = .empty,
         };
     }
 
     pub fn deinit(self: *Vm) void {
         self.atomic_stack.deinit(self.allocator);
+        self.last_pos.deinit(self.allocator);
     }
 
     /// Try to match within a sub-instruction range, returning the match end position (null on failure).
@@ -2427,8 +2430,16 @@ pub const Vm = struct {
                         start += 1;
                     }
                 } else {
-                    while (start < input.len and !unicode_case.caseInsensitiveEqual(input[start], first)) {
-                        start += 1;
+                    // Fast path: ASCII characters can use simple toLower comparison
+                    if (first < 128) {
+                        const first_lower = std.ascii.toLower(first);
+                        while (start < input.len and std.ascii.toLower(input[start]) != first_lower) {
+                            start += 1;
+                        }
+                    } else {
+                        while (start < input.len and !unicode_case.caseInsensitiveEqual(input[start], first)) {
+                            start += 1;
+                        }
                     }
                 }
                 if (start > input.len) break;
@@ -2469,10 +2480,8 @@ pub const Vm = struct {
         var step_counter: usize = 0;
         const max_steps = self.options.max_steps;
 
-        var last_pos: std.ArrayList(?usize) = .empty;
-        defer last_pos.deinit(self.allocator);
-        try last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
-        @memset(last_pos.items, null);
+        try self.last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
+        @memset(self.last_pos.items, null);
 
         var subroutine_stack: std.ArrayList(usize) = .empty;
         defer subroutine_stack.deinit(self.allocator);
@@ -2681,14 +2690,14 @@ pub const Vm = struct {
                 },
                 .Split => {
                     // Zero-length loop detection
-                    if (last_pos.items[pc]) |lp| {
+                    if (self.last_pos.items[pc]) |lp| {
                         if (lp == pos) {
                             // Prevent infinite loop: if pos didn't advance, skip main branch pc+1 and execute alternate target
                             pc = inst.target.?;
                             continue;
                         }
                     }
-                    last_pos.items[pc] = pos;
+                    self.last_pos.items[pc] = pos;
                     // Push target (alternate branch), execute pc+1 (main branch)
                     try stack.append(self.allocator, .{
                         .pc = inst.target.?,
