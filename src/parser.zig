@@ -296,6 +296,30 @@ pub const Parser = struct {
         return node;
     }
 
+    /// Parse a group body and return an AST node with the given type.
+    fn parseGroupNode(self: *Parser, node_type: NodeType, group_idx: ?usize) ParserError!*AstNode {
+        const inner = try self.parseExpression() orelse {
+            self.setErrorAtToken("Empty group", self.tokenizer.peek());
+            return error.EmptyGroup;
+        };
+        _ = self.tokenizer.expect(.RParen) catch {
+            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
+            inner.deinit(self.allocator);
+            self.allocator.destroy(inner);
+            return error.UnexpectedToken;
+        };
+        const node = try self.allocator.create(AstNode);
+        node.* = .{
+            .type = node_type,
+            .value = null,
+            .left = inner,
+            .right = null,
+            .char_class = null,
+            .group_index = group_idx,
+        };
+        return node;
+    }
+
     pub fn parse(self: *Parser) !?*AstNode {
         var node = try self.parseExpression();
 
@@ -1162,115 +1186,19 @@ pub const Parser = struct {
             _ = self.tokenizer.nextToken(); // consume special
             if (special.type == .Literal and special.value.len == 1) {
                 switch (special.value[0]) {
-                    ':' => {
-                        // Non-capturing group (?:...)
-                        const inner = try self.parseExpression() orelse {
-                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                            return error.EmptyGroup;
-                        };
-                        _ = self.tokenizer.expect(.RParen) catch {
-                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                            return error.UnexpectedToken;
-                        };
-                        const node = try self.allocator.create(AstNode);
-                        node.* = .{
-                            .type = .Group,
-                            .value = null,
-                            .left = inner,
-                            .right = null,
-                            .char_class = null,
-                            .group_index = null,
-                        };
-                        return node;
-                    },
-                    '=' => {
-                        // Positive lookahead (?=...)
-                        const inner = try self.parseExpression() orelse {
-                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                            return error.EmptyGroup;
-                        };
-                        _ = self.tokenizer.expect(.RParen) catch {
-                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                            return error.UnexpectedToken;
-                        };
-                        const node = try self.allocator.create(AstNode);
-                        node.* = .{
-                            .type = .AssertForward,
-                            .value = null,
-                            .left = inner,
-                            .right = null,
-                            .char_class = null,
-                            .group_index = null,
-                        };
-                        return node;
-                    },
-                    '!' => {
-                        // Negative lookahead (?!...)
-                        const inner = try self.parseExpression() orelse {
-                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                            return error.EmptyGroup;
-                        };
-                        _ = self.tokenizer.expect(.RParen) catch {
-                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                            return error.UnexpectedToken;
-                        };
-                        const node = try self.allocator.create(AstNode);
-                        node.* = .{
-                            .type = .AssertForwardNegative,
-                            .value = null,
-                            .left = inner,
-                            .right = null,
-                            .char_class = null,
-                            .group_index = null,
-                        };
-                        return node;
-                    },
+                    ':' => return try self.parseGroupNode(.Group, null),
+                    '=' => return try self.parseGroupNode(.AssertForward, null),
+                    '!' => return try self.parseGroupNode(.AssertForwardNegative, null),
                     '<' => {
                         // Check if lookbehind (?<=...), (?<!...) or named capture group (?<name>...)
                         const next = self.tokenizer.peek();
                         if (next.type == .Literal and next.value.len == 1) {
                             if (next.value[0] == '=') {
-                                // Positive lookbehind (?<=...)
                                 _ = self.tokenizer.nextToken(); // consume '='
-                                const inner = try self.parseExpression() orelse {
-                                    self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                                    return error.EmptyGroup;
-                                };
-                                _ = self.tokenizer.expect(.RParen) catch {
-                                    self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                                    return error.UnexpectedToken;
-                                };
-                                const node = try self.allocator.create(AstNode);
-                                node.* = .{
-                                    .type = .AssertBackward,
-                                    .value = null,
-                                    .left = inner,
-                                    .right = null,
-                                    .char_class = null,
-                                    .group_index = null,
-                                };
-                                return node;
+                                return try self.parseGroupNode(.AssertBackward, null);
                             } else if (next.value[0] == '!') {
-                                // Negative lookbehind (?<!...)
                                 _ = self.tokenizer.nextToken(); // consume '!'
-                                const inner = try self.parseExpression() orelse {
-                                    self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                                    return error.EmptyGroup;
-                                };
-                                _ = self.tokenizer.expect(.RParen) catch {
-                                    self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                                    return error.UnexpectedToken;
-                                };
-                                const node = try self.allocator.create(AstNode);
-                                node.* = .{
-                                    .type = .AssertBackwardNegative,
-                                    .value = null,
-                                    .left = inner,
-                                    .right = null,
-                                    .char_class = null,
-                                    .group_index = null,
-                                };
-                                return node;
+                                return try self.parseGroupNode(.AssertBackwardNegative, null);
                             }
                         }
                         // Named capture group (?<name>...)
@@ -1289,27 +1217,7 @@ pub const Parser = struct {
                     'i', 'm', 's', 'x' => {
                         return try self.parseInlineFlagGroup(special);
                     },
-                    '>' => {
-                        // Atomic group (?>...)
-                        const inner = try self.parseExpression() orelse {
-                            self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                            return error.EmptyGroup;
-                        };
-                        _ = self.tokenizer.expect(.RParen) catch {
-                            self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                            return error.UnexpectedToken;
-                        };
-                        const node = try self.allocator.create(AstNode);
-                        node.* = .{
-                            .type = .AtomicGroup,
-                            .value = null,
-                            .left = inner,
-                            .right = null,
-                            .char_class = null,
-                            .group_index = null,
-                        };
-                        return node;
-                    },
+                    '>' => return try self.parseGroupNode(.AtomicGroup, null),
                     else => {
                         self.setErrorAtToken("Unexpected token in group", special);
                         return error.UnexpectedToken;
@@ -1322,29 +1230,7 @@ pub const Parser = struct {
             // Ordinary capturing group
             self.group_counter += 1;
             const group_index = self.group_counter;
-
-            const inner = try self.parseExpression() orelse {
-                self.setErrorAtToken("Empty group", self.tokenizer.peek());
-                return error.EmptyGroup;
-            };
-
-            _ = self.tokenizer.expect(.RParen) catch {
-                self.setErrorAtToken("Unclosed group", self.tokenizer.peek());
-                inner.deinit(self.allocator);
-                self.allocator.destroy(inner);
-                return error.UnexpectedToken;
-            };
-
-            const node = try self.allocator.create(AstNode);
-            node.* = .{
-                .type = .Group,
-                .value = null,
-                .left = inner,
-                .right = null,
-                .char_class = null,
-                .group_index = group_index,
-            };
-            return node;
+            return self.parseGroupNode(.Group, group_index);
         }
     }
 

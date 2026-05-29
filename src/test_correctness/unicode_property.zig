@@ -1,262 +1,229 @@
 const std = @import("std");
 const regex = @import("../root.zig");
+const h = @import("helpers.zig");
 
 test "unicode property: \\p{L} letter" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{L}", "a"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{L}", "A"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{L}", "1"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{L}", "!"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{L}", " "));
+    try h.expectMatch("\\p{L}", "a");
+    try h.expectMatch("\\p{L}", "A");
+    try h.expectNoMatch("\\p{L}", "1");
+    try h.expectNoMatch("\\p{L}", "!");
+    try h.expectNoMatch("\\p{L}", " ");
 }
 
 test "unicode property: \\p{Lu} uppercase" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Lu}", "A"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Lu}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Lu}", "1"));
+    try h.expectMatch("\\p{Lu}", "A");
+    try h.expectNoMatch("\\p{Lu}", "a");
+    try h.expectNoMatch("\\p{Lu}", "1");
 }
 
 test "unicode property: \\p{Ll} lowercase" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Ll}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Ll}", "A"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Ll}", "1"));
+    try h.expectMatch("\\p{Ll}", "a");
+    try h.expectNoMatch("\\p{Ll}", "A");
+    try h.expectNoMatch("\\p{Ll}", "1");
 }
 
 test "unicode property: \\p{N} number" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{N}", "0"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{N}", "9"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{N}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{N}", " "));
+    try h.expectMatch("\\p{N}", "0");
+    try h.expectMatch("\\p{N}", "9");
+    try h.expectNoMatch("\\p{N}", "a");
+    try h.expectNoMatch("\\p{N}", " ");
 }
 
 test "unicode property: \\p{Nd} decimal digit" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Nd}", "5"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Nd}", "a"));
+    try h.expectMatch("\\p{Nd}", "5");
+    try h.expectNoMatch("\\p{Nd}", "a");
 }
 
 test "unicode property: \\p{P} punctuation" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{P}", "!"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{P}", ","));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{P}", "."));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{P}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{P}", "1"));
+    try h.expectMatch("\\p{P}", "!");
+    try h.expectMatch("\\p{P}", ",");
+    try h.expectMatch("\\p{P}", ".");
+    try h.expectNoMatch("\\p{P}", "a");
+    try h.expectNoMatch("\\p{P}", "1");
 }
 
 test "unicode property: \\p{Ps} open punctuation" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Ps}", "("));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Ps}", "["));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Ps}", ")"));
+    try h.expectMatch("\\p{Ps}", "(");
+    try h.expectMatch("\\p{Ps}", "[");
+    try h.expectNoMatch("\\p{Ps}", ")");
 }
 
 test "unicode property: \\p{Pe} close punctuation" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Pe}", ")"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Pe}", "]"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Pe}", "("));
+    try h.expectMatch("\\p{Pe}", ")");
+    try h.expectMatch("\\p{Pe}", "]");
+    try h.expectNoMatch("\\p{Pe}", "(");
 }
 
 test "unicode property: \\p{Z} separator" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Z}", " "));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Z}", "a"));
+    try h.expectMatch("\\p{Z}", " ");
+    try h.expectNoMatch("\\p{Z}", "a");
 }
 
 test "unicode property: \\p{C} control/format" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Cc}", "\x01"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Cc}", "\x7F"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Cc}", "a"));
+    try h.expectMatch("\\p{Cc}", "\x01");
+    try h.expectMatch("\\p{Cc}", "\x7F");
+    try h.expectNoMatch("\\p{Cc}", "a");
 }
 
 test "unicode property: \\p{Sc} currency symbol" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Sc}", "$"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Sc}", "\u{00A3}"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Sc}", "a"));
+    try h.expectMatch("\\p{Sc}", "$");
+    try h.expectMatch("\\p{Sc}", "\u{00A3}");
+    try h.expectNoMatch("\\p{Sc}", "a");
 }
 
 test "unicode property: \\p{Sm} math symbol" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Sm}", "+"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Sm}", "="));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Sm}", "a"));
+    try h.expectMatch("\\p{Sm}", "+");
+    try h.expectMatch("\\p{Sm}", "=");
+    try h.expectNoMatch("\\p{Sm}", "a");
 }
 
 test "unicode property: \\p{Han} CJK" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Han}", "中"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Han}", "文"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Han}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Han}", "1"));
+    try h.expectMatch("\\p{Han}", "中");
+    try h.expectMatch("\\p{Han}", "文");
+    try h.expectNoMatch("\\p{Han}", "a");
+    try h.expectNoMatch("\\p{Han}", "1");
 }
 
 test "unicode property: \\p{Latin}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Latin}", "a"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Latin}", "Z"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Latin}", "中"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Latin}", "1"));
+    try h.expectMatch("\\p{Latin}", "a");
+    try h.expectMatch("\\p{Latin}", "Z");
+    try h.expectNoMatch("\\p{Latin}", "中");
+    try h.expectNoMatch("\\p{Latin}", "1");
 }
 
 test "unicode property: \\P{L} not letter" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(!try regex.isMatch(allocator, "\\P{L}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\P{L}", "A"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\P{L}", "1"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\P{L}", "!"));
+    try h.expectNoMatch("\\P{L}", "a");
+    try h.expectNoMatch("\\P{L}", "A");
+    try h.expectMatch("\\P{L}", "1");
+    try h.expectMatch("\\P{L}", "!");
 }
 
 test "unicode property: quantifier" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{L}+", "abc"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{N}+", "123"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{L}+", "123"));
+    try h.expectMatch("\\p{L}+", "abc");
+    try h.expectMatch("\\p{N}+", "123");
+    try h.expectNoMatch("\\p{L}+", "123");
 }
 
 test "unicode property: alternation" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{L}|\\p{N}", "a"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{L}|\\p{N}", "1"));
+    try h.expectMatch("\\p{L}|\\p{N}", "a");
+    try h.expectMatch("\\p{L}|\\p{N}", "1");
 }
 
 test "unicode property: \\p{Greek}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Greek}", "α"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Greek}", "Ω"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Greek}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Greek}", "1"));
+    try h.expectMatch("\\p{Greek}", "α");
+    try h.expectMatch("\\p{Greek}", "Ω");
+    try h.expectNoMatch("\\p{Greek}", "a");
+    try h.expectNoMatch("\\p{Greek}", "1");
 }
 
 test "unicode property: \\p{Cyrillic}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Cyrillic}", "а"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Cyrillic}", "Я"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Cyrillic}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Cyrillic}", "1"));
+    try h.expectMatch("\\p{Cyrillic}", "а");
+    try h.expectMatch("\\p{Cyrillic}", "Я");
+    try h.expectNoMatch("\\p{Cyrillic}", "a");
+    try h.expectNoMatch("\\p{Cyrillic}", "1");
 }
 
 test "unicode property: \\p{Arabic}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Arabic}", "ا"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Arabic}", "ب"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Arabic}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Arabic}", "1"));
+    try h.expectMatch("\\p{Arabic}", "ا");
+    try h.expectMatch("\\p{Arabic}", "ب");
+    try h.expectNoMatch("\\p{Arabic}", "a");
+    try h.expectNoMatch("\\p{Arabic}", "1");
 }
 
 test "unicode property: \\p{Hebrew}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Hebrew}", "א"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Hebrew}", "ת"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Hebrew}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Hebrew}", "1"));
+    try h.expectMatch("\\p{Hebrew}", "א");
+    try h.expectMatch("\\p{Hebrew}", "ת");
+    try h.expectNoMatch("\\p{Hebrew}", "a");
+    try h.expectNoMatch("\\p{Hebrew}", "1");
 }
 
 test "unicode property: \\p{Armenian}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Armenian}", "Ա"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Armenian}", "ֆ"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Armenian}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Armenian}", "1"));
+    try h.expectMatch("\\p{Armenian}", "Ա");
+    try h.expectMatch("\\p{Armenian}", "ֆ");
+    try h.expectNoMatch("\\p{Armenian}", "a");
+    try h.expectNoMatch("\\p{Armenian}", "1");
 }
 
 test "unicode property: \\p{Georgian}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Georgian}", "ა"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Georgian}", "ჰ"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Georgian}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Georgian}", "1"));
+    try h.expectMatch("\\p{Georgian}", "ა");
+    try h.expectMatch("\\p{Georgian}", "ჰ");
+    try h.expectNoMatch("\\p{Georgian}", "a");
+    try h.expectNoMatch("\\p{Georgian}", "1");
 }
 
 test "unicode property: \\p{Thai}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Thai}", "ก"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Thai}", "ฮ"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Thai}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Thai}", "1"));
+    try h.expectMatch("\\p{Thai}", "ก");
+    try h.expectMatch("\\p{Thai}", "ฮ");
+    try h.expectNoMatch("\\p{Thai}", "a");
+    try h.expectNoMatch("\\p{Thai}", "1");
 }
 
 test "unicode property: \\p{Devanagari}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Devanagari}", "अ"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Devanagari}", "ह"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Devanagari}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Devanagari}", "1"));
+    try h.expectMatch("\\p{Devanagari}", "अ");
+    try h.expectMatch("\\p{Devanagari}", "ह");
+    try h.expectNoMatch("\\p{Devanagari}", "a");
+    try h.expectNoMatch("\\p{Devanagari}", "1");
 }
 
 test "unicode property: \\p{Hiragana}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Hiragana}", "あ"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Hiragana}", "ん"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Hiragana}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Hiragana}", "1"));
+    try h.expectMatch("\\p{Hiragana}", "あ");
+    try h.expectMatch("\\p{Hiragana}", "ん");
+    try h.expectNoMatch("\\p{Hiragana}", "a");
+    try h.expectNoMatch("\\p{Hiragana}", "1");
 }
 
 test "unicode property: \\p{Katakana}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Katakana}", "ア"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Katakana}", "ン"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Katakana}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Katakana}", "1"));
+    try h.expectMatch("\\p{Katakana}", "ア");
+    try h.expectMatch("\\p{Katakana}", "ン");
+    try h.expectNoMatch("\\p{Katakana}", "a");
+    try h.expectNoMatch("\\p{Katakana}", "1");
 }
 
 test "unicode property: \\p{Hangul}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Hangul}", "가"));
-    try std.testing.expect(try regex.isMatch(allocator, "\\p{Hangul}", "힣"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Hangul}", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "\\p{Hangul}", "1"));
+    try h.expectMatch("\\p{Hangul}", "가");
+    try h.expectMatch("\\p{Hangul}", "힣");
+    try h.expectNoMatch("\\p{Hangul}", "a");
+    try h.expectNoMatch("\\p{Hangul}", "1");
 }
 
 test "unicode property in char class: \\p{L}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{L}]", "a"));
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{L}]", "A"));
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{L}]", "中"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[\\p{L}]", "1"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[\\p{L}]", "!"));
+    try h.expectMatch("[\\p{L}]", "a");
+    try h.expectMatch("[\\p{L}]", "A");
+    try h.expectMatch("[\\p{L}]", "中");
+    try h.expectNoMatch("[\\p{L}]", "1");
+    try h.expectNoMatch("[\\p{L}]", "!");
 }
 
 test "unicode property in char class: \\p{N} and \\p{L}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{L}\\p{N}]", "a"));
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{L}\\p{N}]", "5"));
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{L}\\p{N}]", "中"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[\\p{L}\\p{N}]", "!"));
+    try h.expectMatch("[\\p{L}\\p{N}]", "a");
+    try h.expectMatch("[\\p{L}\\p{N}]", "5");
+    try h.expectMatch("[\\p{L}\\p{N}]", "中");
+    try h.expectNoMatch("[\\p{L}\\p{N}]", "!");
 }
 
 test "unicode property in char class: negated class" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(!try regex.isMatch(allocator, "[^\\p{L}]", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[^\\p{L}]", "中"));
-    try std.testing.expect(try regex.isMatch(allocator, "[^\\p{L}]", "1"));
-    try std.testing.expect(try regex.isMatch(allocator, "[^\\p{L}]", "!"));
+    try h.expectNoMatch("[^\\p{L}]", "a");
+    try h.expectNoMatch("[^\\p{L}]", "中");
+    try h.expectMatch("[^\\p{L}]", "1");
+    try h.expectMatch("[^\\p{L}]", "!");
 }
 
 test "unicode property in char class: \\P{L} (negated property)" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(!try regex.isMatch(allocator, "[\\P{L}]", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[\\P{L}]", "中"));
-    try std.testing.expect(try regex.isMatch(allocator, "[\\P{L}]", "1"));
-    try std.testing.expect(try regex.isMatch(allocator, "[\\P{L}]", "!"));
+    try h.expectNoMatch("[\\P{L}]", "a");
+    try h.expectNoMatch("[\\P{L}]", "中");
+    try h.expectMatch("[\\P{L}]", "1");
+    try h.expectMatch("[\\P{L}]", "!");
 }
 
 test "unicode property in char class: mixed with ranges" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "[a-z\\p{L}]", "a"));
-    try std.testing.expect(try regex.isMatch(allocator, "[a-z\\p{L}]", "中"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[a-z\\p{L}]", "1"));
+    try h.expectMatch("[a-z\\p{L}]", "a");
+    try h.expectMatch("[a-z\\p{L}]", "中");
+    try h.expectNoMatch("[a-z\\p{L}]", "1");
 }
 
 test "unicode property in char class: \\p{Han}" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{Han}]", "中"));
-    try std.testing.expect(try regex.isMatch(allocator, "[\\p{Han}]", "文"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[\\p{Han}]", "a"));
-    try std.testing.expect(!try regex.isMatch(allocator, "[\\p{Han}]", "1"));
+    try h.expectMatch("[\\p{Han}]", "中");
+    try h.expectMatch("[\\p{Han}]", "文");
+    try h.expectNoMatch("[\\p{Han}]", "a");
+    try h.expectNoMatch("[\\p{Han}]", "1");
 }
