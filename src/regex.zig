@@ -156,6 +156,22 @@ pub const Regex = struct {
         return result.matched and result.end == text.len;
     }
     
+    /// Find the last capture group that matched.
+    fn findLastCaptureGroup(match_result: MatchResult) ?usize {
+        var last_group_idx: ?usize = null;
+        var group_idx: usize = 1;
+        while (group_idx * 2 + 1 < match_result.captures.items.len) : (group_idx += 1) {
+            const start_slot = group_idx * 2;
+            const end_slot = group_idx * 2 + 1;
+            if (match_result.captures.items[start_slot] != null and
+                match_result.captures.items[end_slot] != null)
+            {
+                last_group_idx = group_idx;
+            }
+        }
+        return last_group_idx;
+    }
+
     fn appendReplacement(self: *Regex, result: *std.ArrayList(u8), text: []const u8, match_result: MatchResult, replacement: []const u8) !void {
         // Append replacement text (supports $0, $1, ..., ${10}, ${name}, $&, $`, $', $$)
         var rep_i: usize = 0;
@@ -183,18 +199,7 @@ pub const Regex = struct {
                     rep_i += 2;
                 } else if (next_ch == '+') {
                     // $+ - last capture group that matched
-                    var last_group_idx: ?usize = null;
-                    var group_idx: usize = 1;
-                    while (group_idx * 2 + 1 < match_result.captures.items.len) : (group_idx += 1) {
-                        const start_slot = group_idx * 2;
-                        const end_slot = group_idx * 2 + 1;
-                        if (match_result.captures.items[start_slot] != null and
-                            match_result.captures.items[end_slot] != null)
-                        {
-                            last_group_idx = group_idx;
-                        }
-                    }
-                    if (last_group_idx) |idx| {
+                    if (findLastCaptureGroup(match_result)) |idx| {
                         if (match_result.getGroup(text, idx)) |group_text| {
                             try result.appendSlice(self.allocator, group_text);
                         }
