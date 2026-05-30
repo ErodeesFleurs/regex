@@ -136,6 +136,7 @@ pub const Bytecode = struct {
     unicode_properties: std.ArrayList([]const u8),
     first_char: ?u8 = null, // first literal character, used for fast skipping in find()
     assert_ends: std.ArrayList(usize), // indexed by PC, contains end PC for assert instructions
+    is_anchored: bool = false, // true if pattern starts with ^ or \A
 
     allocator: std.mem.Allocator,
 
@@ -146,6 +147,7 @@ pub const Bytecode = struct {
             .unicode_properties = .empty,
             .first_char = null,
             .assert_ends = .empty,
+            .is_anchored = false,
             .allocator = allocator,
         };
     }

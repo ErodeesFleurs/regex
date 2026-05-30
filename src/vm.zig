@@ -2417,6 +2417,11 @@ pub const Vm = struct {
             return null;
         }
         
+        // Anchored pattern: only try position 0
+        if (self.bytecode.is_anchored) {
+            return try self.exec(input, 0);
+        }
+
         // Generic path
         for (0..input.len + 1) |start| {
             var result = try self.exec(input, start);

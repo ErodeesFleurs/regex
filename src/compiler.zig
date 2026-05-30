@@ -83,6 +83,10 @@ pub const Compiler = struct {
             if (first_inst.opcode == .Char) {
                 self.bytecode.first_char = first_inst.char;
             }
+            // Detect anchored patterns (\A only; ^ depends on multiline runtime option)
+            if (first_inst.opcode == .AssertStringStart) {
+                self.bytecode.is_anchored = true;
+            }
         }
 
         // Build assert_ends lookup table for fast VM execution
