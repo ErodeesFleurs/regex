@@ -203,23 +203,6 @@ inline fn matchCharUtf8(input: []const u8, pos: usize, expected_cp: u21, case_se
 }
 
 /// Find the end PC of an assert block (lookahead/lookbehind).
-fn findAssertEnd(bytecode: []const Instruction, start_pc: usize) usize {
-    var depth: usize = 1;
-    var end_pc = start_pc;
-    while (end_pc < bytecode.len) : (end_pc += 1) {
-        const inst2 = bytecode[end_pc];
-        switch (inst2.opcode) {
-            .AssertForward, .AssertForwardNegative, .AssertBackward, .AssertBackwardNegative => depth += 1,
-            .AssertForwardEnd, .AssertBackwardEnd => {
-                depth -= 1;
-                if (depth == 0) break;
-            },
-            else => {},
-        }
-    }
-    return end_pc;
-}
-
 /// Match a backref at the given position.
 /// Returns the byte length to advance if matched, null otherwise.
 inline fn matchBackref(input: []const u8, pos: usize, captures: []const ?usize, group_idx: usize, case_sensitive: bool) ?usize {
@@ -2286,7 +2269,7 @@ pub const Vm = struct {
                     }
                 },
                 .AssertForward => {
-                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                    const epc = self.bytecode.assert_ends.items[pc];
                     var sub_result = try execInternal(true, self, input, pos, pc + 1, epc);
                     defer sub_result.deinit();
                     if (sub_result.matched) {
@@ -2296,7 +2279,7 @@ pub const Vm = struct {
                     }
                 },
                 .AssertForwardNegative => {
-                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                    const epc = self.bytecode.assert_ends.items[pc];
                     var sub_result = try execInternal(true, self, input, pos, pc + 1, epc);
                     defer sub_result.deinit();
                     if (!sub_result.matched) {
@@ -2309,7 +2292,7 @@ pub const Vm = struct {
                     pc += 1;
                 },
                 .AssertBackward => {
-                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                    const epc = self.bytecode.assert_ends.items[pc];
                     var success = false;
                     var try_pos: usize = 0;
                     while (try_pos <= pos) : (try_pos += 1) {
@@ -2329,7 +2312,7 @@ pub const Vm = struct {
                     }
                 },
                 .AssertBackwardNegative => {
-                    const epc = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                    const epc = self.bytecode.assert_ends.items[pc];
                     var success = true;
                     var try_pos: usize = 0;
                     while (try_pos <= pos) : (try_pos += 1) {

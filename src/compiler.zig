@@ -8,6 +8,24 @@ const OpCode = @import("bytecode.zig").OpCode;
 
 const RegexOptions = @import("options.zig").RegexOptions;
 
+/// Find the end PC of an assert block (lookahead/lookbehind).
+fn findAssertEnd(instructions: []const Instruction, start_pc: usize) usize {
+    var depth: usize = 1;
+    var end_pc = start_pc;
+    while (end_pc < instructions.len) : (end_pc += 1) {
+        const inst2 = instructions[end_pc];
+        switch (inst2.opcode) {
+            .AssertForward, .AssertForwardNegative, .AssertBackward, .AssertBackwardNegative => depth += 1,
+            .AssertForwardEnd, .AssertBackwardEnd => {
+                depth -= 1;
+                if (depth == 0) break;
+            },
+            else => {},
+        }
+    }
+    return end_pc;
+}
+
 const GroupRange = struct {
     start: usize,
     end: usize,
@@ -64,6 +82,18 @@ pub const Compiler = struct {
             const first_inst = self.bytecode.instructions.items[0];
             if (first_inst.opcode == .Char) {
                 self.bytecode.first_char = first_inst.char;
+            }
+        }
+
+        // Build assert_ends lookup table for fast VM execution
+        try self.bytecode.assert_ends.resize(self.allocator, self.bytecode.instructions.items.len);
+        @memset(self.bytecode.assert_ends.items, 0);
+        for (self.bytecode.instructions.items, 0..) |inst, pc| {
+            switch (inst.opcode) {
+                .AssertForward, .AssertForwardNegative, .AssertBackward, .AssertBackwardNegative => {
+                    self.bytecode.assert_ends.items[pc] = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                },
+                else => {},
             }
         }
 
@@ -511,6 +541,7 @@ pub const Compiler = struct {
             }
         }
     }
+
 };
 
 test "compiler literal" {
