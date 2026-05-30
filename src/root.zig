@@ -1,5 +1,4 @@
 const std = @import("std");
-const Io = std.Io;
 
 // 导出公共 API
 pub const Regex = @import("regex.zig").Regex;

@@ -11,9 +11,12 @@ pub const MatchResult = struct {
     start: usize,
     end: usize,
     allocator: std.mem.Allocator,
+    captures_owned: bool = true,
 
     pub fn deinit(self: *MatchResult) void {
-        self.captures.deinit(self.allocator);
+        if (self.captures_owned) {
+            self.captures.deinit(self.allocator);
+        }
     }
 
     pub fn getGroup(self: MatchResult, input: []const u8, group_idx: usize) ?[]const u8 {
@@ -32,6 +35,44 @@ pub const MatchResult = struct {
         if (start == null or end == null) return null;
 
         return input[start.?..end.?];
+    }
+
+    /// Create a sub-match result (no captures, owned).
+    pub fn sub(matched: bool, start_pos: usize, end_pos: usize, allocator: std.mem.Allocator) MatchResult {
+        return .{
+            .matched = matched,
+            .captures = .empty,
+            .start = start_pos,
+            .end = end_pos,
+            .allocator = allocator,
+            .captures_owned = true,
+        };
+    }
+
+    /// Create a main match result with borrowed captures.
+    pub fn borrow(matched_: bool, captures_buf: std.ArrayList(?usize), start_pos: usize, end_pos: usize, allocator: std.mem.Allocator) MatchResult {
+        const match_start = if (captures_buf.items[0]) |s| s else start_pos;
+        return .{
+            .matched = matched_,
+            .captures = captures_buf,
+            .start = match_start,
+            .end = end_pos,
+            .allocator = allocator,
+            .captures_owned = false,
+        };
+    }
+
+    /// Create a main match result with owned captures.
+    pub fn owned(matched_: bool, captures_slice: []?usize, start_pos: usize, end_pos: usize, allocator: std.mem.Allocator) MatchResult {
+        const match_start = if (captures_slice.len > 0 and captures_slice[0] != null) captures_slice[0].? else start_pos;
+        return .{
+            .matched = matched_,
+            .captures = .{ .items = captures_slice, .capacity = captures_slice.len },
+            .start = match_start,
+            .end = end_pos,
+            .allocator = allocator,
+            .captures_owned = true,
+        };
     }
 };
 
@@ -129,12 +170,19 @@ fn tryMatch(
 
 /// Match a CharClass instruction at the given position.
 /// Returns the byte length to advance if matched, null otherwise.
-inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_sensitive: bool) ?usize {
+fn matchCharClass(cc: *const @import("parser.zig").CharClass, input: []const u8, pos: usize, case_sensitive: bool) ?usize {
     if (pos >= input.len) return null;
     const ch = input[pos];
-    var matches = false;
-    var advance_len: usize = 1;
-    const cc = inst.char_class.?.*;
+
+    // Fast path for ASCII: check dense bitmap first (O(1)).
+    // Only use bitmap for non-negated classes with no POSIX/Unicode classes,
+    // because bitmap tracks ranges only.
+    if (ch < 128 and cc.has_ascii_bitmap and !cc.negated and !cc.has_ranges_or_posix and !cc.has_unicode_ranges and !cc.has_unicode_props) {
+        const byte = ch;
+        const byte_mask = @as(u1, @truncate(cc.ascii_bitmap[byte >> 3] >> @truncate(byte & 7)));
+        if (byte_mask != 0) return 1;
+        return null;
+    }
 
     // Check ranges and POSIX classes (ASCII single-byte)
     if (ch < 128 and cc.has_ranges_or_posix) {
@@ -142,44 +190,43 @@ inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_
             cc.contains(ch)
         else
             cc.contains(ch) or cc.contains(std.ascii.toLower(ch)) or cc.contains(std.ascii.toUpper(ch));
+        if (range_match) return 1;
         const posix_match = if (case_sensitive)
             cc.containsPosixClass(ch)
         else
             cc.containsPosixClass(ch) or cc.containsPosixClass(std.ascii.toLower(ch)) or cc.containsPosixClass(std.ascii.toUpper(ch));
-        matches = range_match or posix_match;
+        if (posix_match) return 1;
     }
 
-    // Check Unicode ranges (both ASCII and non-ASCII)
-    if (!matches and cc.has_unicode_ranges) {
+    // For ASCII chars with no Unicode data, we're done
+    if (ch < 128 and !cc.has_unicode_ranges and !cc.has_unicode_props) return null;
+
+    // Check Unicode ranges
+    if (cc.has_unicode_ranges) {
         if (ch < 128) {
-            matches = cc.containsUnicodeRange(ch);
+            if (cc.containsUnicodeRange(ch)) return 1;
         } else {
             const byte_len = std.unicode.utf8ByteSequenceLength(ch) catch 1;
             if (pos + byte_len <= input.len) {
                 const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch ch;
-                if (cc.containsUnicodeRange(cp)) {
-                    matches = true;
-                    advance_len = byte_len;
-                }
+                if (cc.containsUnicodeRange(cp)) return byte_len;
             }
         }
     }
 
-    // Check Unicode properties (handles both ASCII and non-ASCII)
-    if (!matches and cc.has_unicode_props) {
+    // Check Unicode properties
+    if (cc.has_unicode_props) {
         if (matchUnicodePropertyInClass(input, pos, cc)) |byte_len| {
-            matches = true;
-            advance_len = byte_len;
+            return byte_len;
         }
     }
 
-    if (matches) return advance_len;
     return null;
 }
 
 /// Match a CharUtf8 instruction at the given position.
 /// Returns the byte length to advance if matched, null otherwise.
-inline fn matchCharUtf8(input: []const u8, pos: usize, expected_cp: u21, case_sensitive: bool) ?usize {
+fn matchCharUtf8(input: []const u8, pos: usize, expected_cp: u21, case_sensitive: bool) ?usize {
     if (pos >= input.len) return null;
     const first = input[pos];
     // Fast path for ASCII characters
@@ -205,7 +252,7 @@ inline fn matchCharUtf8(input: []const u8, pos: usize, expected_cp: u21, case_se
 /// Find the end PC of an assert block (lookahead/lookbehind).
 /// Match a backref at the given position.
 /// Returns the byte length to advance if matched, null otherwise.
-inline fn matchBackref(input: []const u8, pos: usize, captures: []const ?usize, group_idx: usize, case_sensitive: bool) ?usize {
+fn matchBackref(input: []const u8, pos: usize, captures: []const ?usize, group_idx: usize, case_sensitive: bool) ?usize {
     const start_slot = group_idx * 2;
     const end_slot = group_idx * 2 + 1;
     if (start_slot >= captures.len or end_slot >= captures.len) return null;
@@ -238,6 +285,1498 @@ inline fn checkAssertStart(pos: usize, input: []const u8, multiline: bool) bool 
 inline fn checkAssertEnd(pos: usize, input: []const u8, multiline: bool) bool {
     return if (multiline) (pos == input.len or input[pos] == '\n') else (pos == input.len);
 }
+
+
+inline fn inUnicodeRanges(cp: u21, ranges: []const [2]u21) bool {
+    var left: usize = 0;
+    var right: usize = ranges.len;
+    while (left < right) {
+        const mid = (left + right) / 2;
+        const range = ranges[mid];
+        if (cp < range[0]) {
+            right = mid;
+        } else if (cp > range[1]) {
+            left = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+const _Cs_ranges = [_][2]u21{
+        .{0xD800, 0xDFFF},
+    };
+
+const _Cf_ranges = [_][2]u21{
+        .{0x00AD, 0x00AD},
+        .{0x0600, 0x0605},
+        .{0x061C, 0x061C},
+        .{0x06DD, 0x06DD},
+        .{0x070F, 0x070F},
+        .{0x08E2, 0x08E2},
+        .{0x180E, 0x180E},
+        .{0x200B, 0x200F},
+        .{0x202A, 0x202E},
+        .{0x2060, 0x2064},
+        .{0x2066, 0x206F},
+        .{0xFEFF, 0xFEFF},
+        .{0xFFF9, 0xFFFB},
+        .{0x110BD, 0x110BD},
+        .{0x1BCA0, 0x1BCA3},
+        .{0x1D173, 0x1D17A},
+        .{0xE0001, 0xE0001},
+        .{0xE0020, 0xE007F},
+    };
+
+const _Sc_ranges = [_][2]u21{
+        .{0x0024, 0x0024},
+        .{0x00A2, 0x00A5},
+        .{0x058F, 0x058F},
+        .{0x060B, 0x060B},
+        .{0x09F2, 0x09F3},
+        .{0x09FB, 0x09FB},
+        .{0x0AF1, 0x0AF1},
+        .{0x0BF9, 0x0BF9},
+        .{0x0E3F, 0x0E3F},
+        .{0x17DB, 0x17DB},
+        .{0x20A0, 0x20C0},
+        .{0xA838, 0xA838},
+        .{0xFDFC, 0xFDFC},
+        .{0xFE69, 0xFE69},
+        .{0xFF04, 0xFF04},
+        .{0xFFE0, 0xFFE1},
+        .{0xFFE5, 0xFFE6},
+    };
+
+const _Pf_ranges = [_][2]u21{
+        .{0x00BB, 0x00BB},
+        .{0x2019, 0x2019},
+        .{0x201D, 0x201D},
+        .{0x203A, 0x203A},
+    };
+
+const _Ps_ranges = [_][2]u21{
+        .{0x0028, 0x0028},
+        .{0x005B, 0x005B},
+        .{0x007B, 0x007B},
+        .{0x0F3A, 0x0F3A},
+        .{0x0F3C, 0x0F3C},
+        .{0x169B, 0x169B},
+        .{0x201A, 0x201A},
+        .{0x201E, 0x201E},
+        .{0x2045, 0x2045},
+        .{0x207D, 0x207D},
+        .{0x208D, 0x208D},
+        .{0x2308, 0x2308},
+        .{0x230A, 0x230A},
+        .{0x2329, 0x2329},
+        .{0x2768, 0x2768},
+        .{0x276A, 0x276A},
+        .{0x276C, 0x276C},
+        .{0x276E, 0x276E},
+        .{0x2770, 0x2770},
+        .{0x2772, 0x2772},
+        .{0x2774, 0x2774},
+        .{0x27C5, 0x27C5},
+        .{0x27E6, 0x27E6},
+        .{0x27E8, 0x27E8},
+        .{0x27EA, 0x27EA},
+        .{0x27EC, 0x27EC},
+        .{0x27EE, 0x27EE},
+        .{0x2983, 0x2983},
+        .{0x2985, 0x2985},
+        .{0x2987, 0x2987},
+        .{0x2989, 0x2989},
+        .{0x298B, 0x298B},
+        .{0x298D, 0x298D},
+        .{0x298F, 0x298F},
+        .{0x2991, 0x2991},
+        .{0x2993, 0x2993},
+        .{0x2995, 0x2995},
+        .{0x2997, 0x2997},
+        .{0x29D8, 0x29D8},
+        .{0x29DA, 0x29DA},
+        .{0x29FC, 0x29FC},
+        .{0x2E22, 0x2E22},
+        .{0x2E24, 0x2E24},
+        .{0x2E26, 0x2E26},
+        .{0x2E28, 0x2E28},
+        .{0x3008, 0x3008},
+        .{0x300A, 0x300A},
+        .{0x300C, 0x300C},
+        .{0x300E, 0x300E},
+        .{0x3010, 0x3010},
+        .{0x3014, 0x3014},
+        .{0x3016, 0x3016},
+        .{0x3018, 0x3018},
+        .{0x301A, 0x301A},
+        .{0x301D, 0x301D},
+        .{0xFD3F, 0xFD3F},
+        .{0xFE17, 0xFE17},
+        .{0xFE35, 0xFE35},
+        .{0xFE37, 0xFE37},
+        .{0xFE39, 0xFE39},
+        .{0xFE3B, 0xFE3B},
+        .{0xFE3D, 0xFE3D},
+        .{0xFE3F, 0xFE3F},
+        .{0xFE41, 0xFE41},
+        .{0xFE43, 0xFE43},
+        .{0xFE47, 0xFE47},
+        .{0xFE59, 0xFE59},
+        .{0xFE5B, 0xFE5B},
+        .{0xFE5D, 0xFE5D},
+        .{0xFF08, 0xFF08},
+        .{0xFF3B, 0xFF3B},
+        .{0xFF5B, 0xFF5B},
+        .{0xFF5F, 0xFF5F},
+        .{0xFF62, 0xFF62},
+    };
+
+const _Ll_ranges = [_][2]u21{
+        .{0x0061, 0x007A},
+        .{0x00DF, 0x00F6},
+        .{0x00F8, 0x00FF},
+        .{0x0138, 0x0138},
+        .{0x0149, 0x0149},
+        .{0x03AC, 0x03CE},
+        .{0x0430, 0x044F},
+        .{0x0451, 0x045C},
+        .{0x045E, 0x045F},
+        .{0x1F00, 0x1F07},
+        .{0x1F10, 0x1F15},
+        .{0x1F20, 0x1F27},
+        .{0x1F30, 0x1F37},
+        .{0x1F40, 0x1F45},
+        .{0x1F50, 0x1F57},
+        .{0x1F60, 0x1F67},
+        .{0x1F70, 0x1F7D},
+        .{0x1F80, 0x1F87},
+        .{0x1F90, 0x1F97},
+        .{0x1FA0, 0x1FA7},
+        .{0x1FB0, 0x1FB1},
+        .{0x1FD0, 0x1FD1},
+        .{0x1FE0, 0x1FE1},
+        .{0x214E, 0x214E},
+        .{0x2170, 0x217F},
+    };
+
+const _Zl_ranges = [_][2]u21{
+        .{0x2028, 0x2028},
+    };
+
+const _Pi_ranges = [_][2]u21{
+        .{0x00AB, 0x00AB},
+        .{0x2018, 0x2018},
+        .{0x201B, 0x201C},
+        .{0x201F, 0x201F},
+        .{0x2039, 0x2039},
+    };
+
+const _Lm_ranges = [_][2]u21{
+        .{0x02B0, 0x02C1},
+        .{0x02C6, 0x02D1},
+        .{0x02E0, 0x02E4},
+        .{0x02EC, 0x02EC},
+        .{0x02EE, 0x02EE},
+        .{0x0374, 0x0374},
+        .{0x037A, 0x037A},
+        .{0x0559, 0x0559},
+        .{0x0640, 0x0640},
+        .{0x06E5, 0x06E6},
+        .{0x07F4, 0x07F5},
+        .{0x07FA, 0x07FA},
+        .{0x0E46, 0x0E46},
+        .{0x0EC6, 0x0EC6},
+        .{0x10FC, 0x10FC},
+        .{0x17D7, 0x17D7},
+        .{0x1843, 0x1843},
+        .{0x1D2C, 0x1D6A},
+        .{0x1D78, 0x1D78},
+        .{0x1D9B, 0x1DBF},
+        .{0x2071, 0x2071},
+        .{0x207F, 0x207F},
+        .{0x2090, 0x209C},
+        .{0x2C7C, 0x2C7D},
+        .{0x2D6F, 0x2D6F},
+        .{0x2E2F, 0x2E2F},
+        .{0x3005, 0x3005},
+        .{0x3031, 0x3035},
+        .{0x303B, 0x303B},
+        .{0x309D, 0x309E},
+        .{0x30FC, 0x30FE},
+        .{0xA015, 0xA015},
+        .{0xA4F8, 0xA4FD},
+        .{0xA60C, 0xA60C},
+        .{0xA67F, 0xA67F},
+        .{0xA69C, 0xA69D},
+        .{0xA717, 0xA71F},
+        .{0xA770, 0xA770},
+        .{0xA788, 0xA788},
+        .{0xA7F8, 0xA7F9},
+        .{0xA9CF, 0xA9CF},
+        .{0xAA70, 0xAA70},
+        .{0xAADD, 0xAADD},
+        .{0xAAF3, 0xAAF4},
+        .{0xFF70, 0xFF70},
+        .{0xFF9E, 0xFF9F},
+    };
+
+const _Nl_ranges = [_][2]u21{
+        .{0x16EE, 0x16F0},
+        .{0x2160, 0x2182},
+        .{0x2185, 0x2188},
+        .{0x3007, 0x3007},
+        .{0x3021, 0x3029},
+        .{0x3038, 0x303A},
+        .{0xA6E6, 0xA6EF},
+    };
+
+const _Mn_ranges = [_][2]u21{
+        .{0x0300, 0x036F},
+        .{0x0483, 0x0489},
+        .{0x0591, 0x05BD},
+        .{0x05BF, 0x05BF},
+        .{0x05C1, 0x05C2},
+        .{0x05C4, 0x05C5},
+        .{0x05C7, 0x05C7},
+        .{0x0610, 0x061A},
+        .{0x064B, 0x065F},
+        .{0x0670, 0x0670},
+        .{0x06D6, 0x06DC},
+        .{0x06DF, 0x06E4},
+        .{0x06E7, 0x06E8},
+        .{0x06EA, 0x06ED},
+        .{0x0711, 0x0711},
+        .{0x0730, 0x074A},
+        .{0x07A6, 0x07B0},
+        .{0x07EB, 0x07F3},
+        .{0x0816, 0x0819},
+        .{0x081B, 0x0823},
+        .{0x0825, 0x0827},
+        .{0x0829, 0x082D},
+        .{0x0859, 0x085B},
+        .{0x08E3, 0x0902},
+        .{0x093A, 0x093A},
+        .{0x093C, 0x093C},
+        .{0x0941, 0x0948},
+        .{0x094D, 0x094D},
+        .{0x0951, 0x0957},
+        .{0x0962, 0x0963},
+        .{0x0981, 0x0981},
+        .{0x09BC, 0x09BC},
+        .{0x09C1, 0x09C4},
+        .{0x09CD, 0x09CD},
+        .{0x09E2, 0x09E3},
+        .{0x0A01, 0x0A02},
+        .{0x0A3C, 0x0A3C},
+        .{0x0A41, 0x0A42},
+        .{0x0A47, 0x0A48},
+        .{0x0A4B, 0x0A4D},
+        .{0x0A51, 0x0A51},
+        .{0x0A70, 0x0A71},
+        .{0x0A75, 0x0A75},
+        .{0x0A81, 0x0A82},
+        .{0x0ABC, 0x0ABC},
+        .{0x0AC1, 0x0AC5},
+        .{0x0AC7, 0x0AC8},
+        .{0x0ACD, 0x0ACD},
+        .{0x0AE2, 0x0AE3},
+        .{0x0B01, 0x0B01},
+        .{0x0B3C, 0x0B3C},
+        .{0x0B3F, 0x0B3F},
+        .{0x0B41, 0x0B44},
+        .{0x0B4D, 0x0B4D},
+        .{0x0B56, 0x0B56},
+        .{0x0B62, 0x0B63},
+        .{0x0B82, 0x0B82},
+        .{0x0BC0, 0x0BC0},
+        .{0x0BCD, 0x0BCD},
+        .{0x0C00, 0x0C00},
+        .{0x0C3E, 0x0C40},
+        .{0x0C46, 0x0C48},
+        .{0x0C4A, 0x0C4D},
+        .{0x0C55, 0x0C56},
+        .{0x0C62, 0x0C63},
+        .{0x0C81, 0x0C81},
+        .{0x0CBC, 0x0CBC},
+        .{0x0CBF, 0x0CBF},
+        .{0x0CC6, 0x0CC6},
+        .{0x0CCC, 0x0CCD},
+        .{0x0CE2, 0x0CE3},
+        .{0x0D01, 0x0D01},
+        .{0x0D41, 0x0D44},
+        .{0x0D4D, 0x0D4D},
+        .{0x0D62, 0x0D63},
+        .{0x0DCA, 0x0DCA},
+        .{0x0DD2, 0x0DD4},
+        .{0x0DD6, 0x0DD6},
+        .{0x0E31, 0x0E31},
+        .{0x0E34, 0x0E3A},
+        .{0x0E47, 0x0E4E},
+        .{0x0EB1, 0x0EB1},
+        .{0x0EB4, 0x0EB9},
+        .{0x0EBB, 0x0EBC},
+        .{0x0EC8, 0x0ECD},
+        .{0x0F18, 0x0F19},
+        .{0x0F35, 0x0F35},
+        .{0x0F37, 0x0F37},
+        .{0x0F39, 0x0F39},
+        .{0x0F71, 0x0F7E},
+        .{0x0F80, 0x0F84},
+        .{0x0F86, 0x0F87},
+        .{0x0F8D, 0x0F97},
+        .{0x0F99, 0x0FBC},
+        .{0x0FC6, 0x0FC6},
+        .{0x102D, 0x1030},
+        .{0x1032, 0x1037},
+        .{0x1039, 0x103A},
+        .{0x103D, 0x103E},
+        .{0x1058, 0x1059},
+        .{0x105E, 0x1060},
+        .{0x1071, 0x1074},
+        .{0x1082, 0x1082},
+        .{0x1085, 0x1086},
+        .{0x108D, 0x108D},
+        .{0x109D, 0x109D},
+        .{0x135D, 0x135F},
+        .{0x1712, 0x1714},
+        .{0x1732, 0x1734},
+        .{0x1752, 0x1753},
+        .{0x1772, 0x1773},
+        .{0x17B4, 0x17B5},
+        .{0x17B7, 0x17BD},
+        .{0x17C6, 0x17C6},
+        .{0x17C9, 0x17D3},
+        .{0x17DD, 0x17DD},
+        .{0x180B, 0x180D},
+        .{0x1885, 0x1886},
+        .{0x18A9, 0x18A9},
+        .{0x1920, 0x1922},
+        .{0x1927, 0x1928},
+        .{0x1932, 0x1932},
+        .{0x1939, 0x193B},
+        .{0x1A17, 0x1A18},
+        .{0x1A56, 0x1A56},
+        .{0x1A58, 0x1A5E},
+        .{0x1A60, 0x1A60},
+        .{0x1A62, 0x1A62},
+        .{0x1A65, 0x1A6C},
+        .{0x1A73, 0x1A7C},
+        .{0x1A7F, 0x1A7F},
+        .{0x1AB0, 0x1ABD},
+        .{0x1B00, 0x1B03},
+        .{0x1B34, 0x1B34},
+        .{0x1B36, 0x1B3A},
+        .{0x1B3C, 0x1B3C},
+        .{0x1B42, 0x1B42},
+        .{0x1B6B, 0x1B73},
+        .{0x1B80, 0x1B81},
+        .{0x1BA2, 0x1BA5},
+        .{0x1BA8, 0x1BA9},
+        .{0x1BAB, 0x1BAD},
+        .{0x1BE6, 0x1BE6},
+        .{0x1BE8, 0x1BE9},
+        .{0x1BED, 0x1BED},
+        .{0x1BEF, 0x1BF1},
+        .{0x1C2C, 0x1C33},
+        .{0x1C36, 0x1C37},
+        .{0x1CD0, 0x1CD2},
+        .{0x1CD4, 0x1CE0},
+        .{0x1CE2, 0x1CE8},
+        .{0x1CED, 0x1CED},
+        .{0x1CF4, 0x1CF4},
+        .{0x1CF8, 0x1CF9},
+        .{0x1DC0, 0x1DF5},
+        .{0x1DFC, 0x1DFF},
+        .{0x20D0, 0x20DC},
+        .{0x20E1, 0x20E1},
+        .{0x20E5, 0x20F0},
+        .{0x2CEF, 0x2CF1},
+        .{0x2D7F, 0x2D7F},
+        .{0x2DE0, 0x2DFF},
+        .{0x302A, 0x302D},
+        .{0x3099, 0x309A},
+        .{0xA66F, 0xA66F},
+        .{0xA674, 0xA67D},
+        .{0xA69E, 0xA69F},
+        .{0xA6F0, 0xA6F1},
+        .{0xA802, 0xA802},
+        .{0xA806, 0xA806},
+        .{0xA80B, 0xA80B},
+        .{0xA825, 0xA826},
+        .{0xA8C4, 0xA8C5},
+        .{0xA8E0, 0xA8F1},
+        .{0xA926, 0xA92D},
+        .{0xA947, 0xA951},
+        .{0xA980, 0xA982},
+        .{0xA9B3, 0xA9B3},
+        .{0xA9B6, 0xA9B9},
+        .{0xA9BC, 0xA9BC},
+        .{0xA9E5, 0xA9E5},
+        .{0xAA29, 0xAA2E},
+        .{0xAA31, 0xAA32},
+        .{0xAA35, 0xAA36},
+        .{0xAA43, 0xAA43},
+        .{0xAA4C, 0xAA4C},
+        .{0xAA7C, 0xAA7C},
+        .{0xAAB0, 0xAAB0},
+        .{0xAAB2, 0xAAB4},
+        .{0xAAB7, 0xAAB8},
+        .{0xAABE, 0xAABF},
+        .{0xAAC1, 0xAAC1},
+        .{0xAAEC, 0xAAED},
+        .{0xAAF6, 0xAAF6},
+        .{0xABE5, 0xABE5},
+        .{0xABE8, 0xABE8},
+        .{0xABED, 0xABED},
+        .{0xFB1E, 0xFB1E},
+        .{0xFE00, 0xFE0F},
+        .{0xFE20, 0xFE2F},
+    };
+
+const _Lo_ranges = [_][2]u21{
+        .{0x01BB, 0x01BB},
+        .{0x01C0, 0x01C3},
+        .{0x0294, 0x0294},
+        .{0x05D0, 0x05EA},
+        .{0x05F0, 0x05F2},
+        .{0x0621, 0x063F},
+        .{0x0641, 0x064A},
+        .{0x066E, 0x066F},
+        .{0x0671, 0x06D3},
+        .{0x06D5, 0x06D5},
+        .{0x06EE, 0x06EF},
+        .{0x06FA, 0x06FC},
+        .{0x06FF, 0x06FF},
+        .{0x0710, 0x0710},
+        .{0x0712, 0x072F},
+        .{0x074D, 0x07A5},
+        .{0x07B1, 0x07B1},
+        .{0x07CA, 0x07EA},
+        .{0x0800, 0x0815},
+        .{0x0840, 0x0858},
+        .{0x08A0, 0x08AC},
+        .{0x0904, 0x0939},
+        .{0x093D, 0x093D},
+        .{0x0950, 0x0950},
+        .{0x0958, 0x0961},
+        .{0x0972, 0x0980},
+        .{0x0985, 0x098C},
+        .{0x098F, 0x0990},
+        .{0x0993, 0x09A8},
+        .{0x09AA, 0x09B0},
+        .{0x09B2, 0x09B2},
+        .{0x09B6, 0x09B9},
+        .{0x09BD, 0x09BD},
+        .{0x09CE, 0x09CE},
+        .{0x09DC, 0x09DD},
+        .{0x09DF, 0x09E1},
+        .{0x09F0, 0x09F1},
+        .{0x0A05, 0x0A0A},
+        .{0x0A0F, 0x0A10},
+        .{0x0A13, 0x0A28},
+        .{0x0A2A, 0x0A30},
+        .{0x0A32, 0x0A33},
+        .{0x0A35, 0x0A36},
+        .{0x0A38, 0x0A39},
+        .{0x0A59, 0x0A5C},
+        .{0x0A5E, 0x0A5E},
+        .{0x0A72, 0x0A74},
+        .{0x0A85, 0x0A8D},
+        .{0x0A8F, 0x0A91},
+        .{0x0A93, 0x0AA8},
+        .{0x0AAA, 0x0AB0},
+        .{0x0AB2, 0x0AB3},
+        .{0x0AB5, 0x0AB9},
+        .{0x0ABD, 0x0ABD},
+        .{0x0AD0, 0x0AD0},
+        .{0x0AE0, 0x0AE1},
+        .{0x0B05, 0x0B0C},
+        .{0x0B0F, 0x0B10},
+        .{0x0B13, 0x0B28},
+        .{0x0B2A, 0x0B30},
+        .{0x0B32, 0x0B33},
+        .{0x0B35, 0x0B39},
+        .{0x0B3D, 0x0B3D},
+        .{0x0B5C, 0x0B5D},
+        .{0x0B5F, 0x0B61},
+        .{0x0B71, 0x0B71},
+        .{0x0B83, 0x0B83},
+        .{0x0B85, 0x0B8A},
+        .{0x0B8E, 0x0B90},
+        .{0x0B92, 0x0B95},
+        .{0x0B99, 0x0B9A},
+        .{0x0B9C, 0x0B9C},
+        .{0x0B9E, 0x0B9F},
+        .{0x0BA3, 0x0BA4},
+        .{0x0BA8, 0x0BAA},
+        .{0x0BAE, 0x0BB9},
+        .{0x0BD0, 0x0BD0},
+        .{0x0C05, 0x0C0C},
+        .{0x0C0E, 0x0C10},
+        .{0x0C12, 0x0C28},
+        .{0x0C2A, 0x0C39},
+        .{0x0C3D, 0x0C3D},
+        .{0x0C58, 0x0C5A},
+        .{0x0C60, 0x0C61},
+        .{0x0C85, 0x0C8C},
+        .{0x0C8E, 0x0C90},
+        .{0x0C92, 0x0CA8},
+        .{0x0CAA, 0x0CB3},
+        .{0x0CB5, 0x0CB9},
+        .{0x0CBD, 0x0CBD},
+        .{0x0CDE, 0x0CDE},
+        .{0x0CE0, 0x0CE1},
+        .{0x0CF1, 0x0CF2},
+        .{0x0D05, 0x0D0C},
+        .{0x0D0E, 0x0D10},
+        .{0x0D12, 0x0D3A},
+        .{0x0D3D, 0x0D3D},
+        .{0x0D4E, 0x0D4E},
+        .{0x0D5F, 0x0D61},
+        .{0x0D7A, 0x0D7F},
+        .{0x0D85, 0x0D96},
+        .{0x0D9A, 0x0DB1},
+        .{0x0DB3, 0x0DBB},
+        .{0x0DBD, 0x0DBD},
+        .{0x0DC0, 0x0DC6},
+        .{0x0E01, 0x0E30},
+        .{0x0E32, 0x0E33},
+        .{0x0E40, 0x0E46},
+        .{0x0E81, 0x0E82},
+        .{0x0E84, 0x0E84},
+        .{0x0E87, 0x0E88},
+        .{0x0E8A, 0x0E8A},
+        .{0x0E8D, 0x0E8D},
+        .{0x0E94, 0x0E97},
+        .{0x0E99, 0x0E9F},
+        .{0x0EA1, 0x0EA3},
+        .{0x0EA5, 0x0EA5},
+        .{0x0EA7, 0x0EA7},
+        .{0x0EAA, 0x0EAB},
+        .{0x0EAD, 0x0EB0},
+        .{0x0EB2, 0x0EB3},
+        .{0x0EBD, 0x0EBD},
+        .{0x0EC0, 0x0EC4},
+        .{0x0EC6, 0x0EC6},
+        .{0x0EDC, 0x0EDF},
+        .{0x0F00, 0x0F00},
+        .{0x0F40, 0x0F47},
+        .{0x0F49, 0x0F6C},
+        .{0x0F88, 0x0F8C},
+        .{0x1000, 0x102A},
+        .{0x103F, 0x103F},
+        .{0x1050, 0x1055},
+        .{0x105A, 0x105D},
+        .{0x1061, 0x1061},
+        .{0x1065, 0x1066},
+        .{0x106E, 0x1070},
+        .{0x1075, 0x1081},
+        .{0x108E, 0x108E},
+        .{0x10A0, 0x10C5},
+        .{0x10C7, 0x10C7},
+        .{0x10CD, 0x10CD},
+        .{0x10D0, 0x10FA},
+        .{0x10FC, 0x1248},
+        .{0x124A, 0x124D},
+        .{0x1250, 0x1256},
+        .{0x1258, 0x1258},
+        .{0x125A, 0x125D},
+        .{0x1260, 0x1288},
+        .{0x128A, 0x128D},
+        .{0x1290, 0x12B0},
+        .{0x12B2, 0x12B5},
+        .{0x12B8, 0x12BE},
+        .{0x12C0, 0x12C0},
+        .{0x12C2, 0x12C5},
+        .{0x12C8, 0x12D6},
+        .{0x12D8, 0x1310},
+        .{0x1312, 0x1315},
+        .{0x1318, 0x135A},
+        .{0x1380, 0x138F},
+        .{0x13A0, 0x13F5},
+        .{0x13F8, 0x13FD},
+        .{0x1401, 0x166C},
+        .{0x166F, 0x167F},
+        .{0x1681, 0x169A},
+        .{0x16A0, 0x16EA},
+        .{0x16EE, 0x16F0},
+        .{0x1700, 0x170C},
+        .{0x170E, 0x1711},
+        .{0x1720, 0x1731},
+        .{0x1740, 0x1751},
+        .{0x1760, 0x176C},
+        .{0x176E, 0x1770},
+        .{0x1780, 0x17B3},
+        .{0x17D7, 0x17D7},
+        .{0x17DC, 0x17DC},
+        .{0x1820, 0x1877},
+        .{0x1880, 0x1884},
+        .{0x1887, 0x18A8},
+        .{0x18AA, 0x18AA},
+        .{0x18B0, 0x18F5},
+        .{0x1900, 0x191E},
+        .{0x1950, 0x196D},
+        .{0x1970, 0x1974},
+        .{0x1980, 0x19AB},
+        .{0x19C1, 0x19C7},
+        .{0x1A00, 0x1A16},
+        .{0x1A20, 0x1A54},
+        .{0x1AA7, 0x1AA7},
+        .{0x1B05, 0x1B33},
+        .{0x1B45, 0x1B4B},
+        .{0x1B83, 0x1BA0},
+        .{0x1BAE, 0x1BAF},
+        .{0x1BBA, 0x1BE5},
+        .{0x1C00, 0x1C23},
+        .{0x1C4D, 0x1C4F},
+        .{0x1C5A, 0x1C7D},
+        .{0x1C80, 0x1C88},
+        .{0x1CE9, 0x1CEC},
+        .{0x1CEE, 0x1CF1},
+        .{0x1CF5, 0x1CF6},
+        .{0x1D00, 0x1DBF},
+        .{0x1E00, 0x1F15},
+        .{0x1F18, 0x1F1D},
+        .{0x1F20, 0x1F45},
+        .{0x1F48, 0x1F4D},
+        .{0x1F50, 0x1F57},
+        .{0x1F59, 0x1F59},
+        .{0x1F5B, 0x1F5B},
+        .{0x1F5D, 0x1F5D},
+        .{0x1F5F, 0x1F7D},
+        .{0x1F80, 0x1FB4},
+        .{0x1FB6, 0x1FBC},
+        .{0x1FBE, 0x1FBE},
+        .{0x1FC2, 0x1FC4},
+        .{0x1FC6, 0x1FCC},
+        .{0x1FD0, 0x1FD3},
+        .{0x1FD6, 0x1FDB},
+        .{0x1FE0, 0x1FEC},
+        .{0x1FF2, 0x1FF4},
+        .{0x1FF6, 0x1FFC},
+        .{0x2071, 0x2071},
+        .{0x207F, 0x207F},
+        .{0x2090, 0x209C},
+        .{0x2102, 0x2102},
+        .{0x2107, 0x2107},
+        .{0x210A, 0x2113},
+        .{0x2115, 0x2115},
+        .{0x2119, 0x211D},
+        .{0x2124, 0x2124},
+        .{0x2126, 0x2126},
+        .{0x2128, 0x2128},
+        .{0x212A, 0x212D},
+        .{0x212F, 0x2139},
+        .{0x213C, 0x213F},
+        .{0x2145, 0x2149},
+        .{0x214E, 0x214E},
+        .{0x2183, 0x2184},
+        .{0x2C00, 0x2C2E},
+        .{0x2C30, 0x2C5E},
+        .{0x2C60, 0x2CE4},
+        .{0x2CEB, 0x2CEE},
+        .{0x2CF2, 0x2CF3},
+        .{0x2D00, 0x2D25},
+        .{0x2D27, 0x2D27},
+        .{0x2D2D, 0x2D2D},
+        .{0x2D30, 0x2D67},
+        .{0x2D6F, 0x2D6F},
+        .{0x2D80, 0x2D96},
+        .{0x2DA0, 0x2DA6},
+        .{0x2DA8, 0x2DAE},
+        .{0x2DB0, 0x2DB6},
+        .{0x2DB8, 0x2DBE},
+        .{0x2DC0, 0x2DC6},
+        .{0x2DC8, 0x2DCE},
+        .{0x2DD0, 0x2DD6},
+        .{0x2DD8, 0x2DDE},
+        .{0x2E2F, 0x2E2F},
+        .{0x3005, 0x3005},
+        .{0x3007, 0x3007},
+        .{0x3021, 0x3029},
+        .{0x3031, 0x3035},
+        .{0x3038, 0x303A},
+        .{0x303B, 0x303B},
+        .{0x303C, 0x303C},
+        .{0x3041, 0x3096},
+        .{0x309D, 0x309F},
+        .{0x30A1, 0x30FA},
+        .{0x30FC, 0x30FF},
+        .{0x3105, 0x312D},
+        .{0x3131, 0x318E},
+        .{0x31A0, 0x31BA},
+        .{0x31F0, 0x31FF},
+        .{0x3400, 0x4DB5},
+        .{0x4E00, 0x9FCC},
+        .{0xA000, 0xA48C},
+        .{0xA4D0, 0xA4FD},
+        .{0xA500, 0xA60C},
+        .{0xA610, 0xA61F},
+        .{0xA62A, 0xA62B},
+        .{0xA640, 0xA66E},
+        .{0xA67F, 0xA697},
+        .{0xA6A0, 0xA6E5},
+        .{0xA717, 0xA71F},
+        .{0xA722, 0xA788},
+        .{0xA78B, 0xA78E},
+        .{0xA790, 0xA793},
+        .{0xA7A0, 0xA7AA},
+        .{0xA7F8, 0xA801},
+        .{0xA803, 0xA805},
+        .{0xA807, 0xA80A},
+        .{0xA80C, 0xA822},
+        .{0xA840, 0xA873},
+        .{0xA882, 0xA8B3},
+        .{0xA8F2, 0xA8F7},
+        .{0xA8FB, 0xA8FB},
+        .{0xA90A, 0xA925},
+        .{0xA930, 0xA946},
+        .{0xA960, 0xA97C},
+        .{0xA984, 0xA9B2},
+        .{0xA9CF, 0xA9CF},
+        .{0xA9E0, 0xA9E4},
+        .{0xA9E6, 0xA9EF},
+        .{0xA9FA, 0xA9FE},
+        .{0xAA00, 0xAA28},
+        .{0xAA40, 0xAA42},
+        .{0xAA44, 0xAA4B},
+        .{0xAA60, 0xAA76},
+        .{0xAA7A, 0xAA7A},
+        .{0xAA80, 0xAAAF},
+        .{0xAAB1, 0xAAB1},
+        .{0xAAB5, 0xAAB6},
+        .{0xAAB9, 0xAABD},
+        .{0xAAC0, 0xAAC0},
+        .{0xAAC2, 0xAAC2},
+        .{0xAADB, 0xAADD},
+        .{0xAAE0, 0xAAEA},
+        .{0xAAF2, 0xAAF4},
+        .{0xAB01, 0xAB06},
+        .{0xAB09, 0xAB0E},
+        .{0xAB11, 0xAB16},
+        .{0xAB20, 0xAB26},
+        .{0xAB28, 0xAB2E},
+        .{0xAB30, 0xAB5A},
+        .{0xAB5C, 0xAB5F},
+        .{0xAB60, 0xAB65},
+        .{0xAB70, 0xABBF},
+        .{0xABC0, 0xABE2},
+        .{0xAC00, 0xD7A3},
+        .{0xD7B0, 0xD7C6},
+        .{0xD7CB, 0xD7FB},
+        .{0xF900, 0xFA6D},
+        .{0xFA70, 0xFAD9},
+        .{0xFB00, 0xFB06},
+        .{0xFB13, 0xFB17},
+        .{0xFB1D, 0xFB1D},
+        .{0xFB1F, 0xFB28},
+        .{0xFB2A, 0xFB36},
+        .{0xFB38, 0xFB3C},
+        .{0xFB3E, 0xFB3E},
+        .{0xFB40, 0xFB41},
+        .{0xFB43, 0xFB44},
+        .{0xFB46, 0xFBB1},
+        .{0xFBD3, 0xFD3D},
+        .{0xFD50, 0xFD8F},
+        .{0xFD92, 0xFDC7},
+        .{0xFDF0, 0xFDFB},
+        .{0xFE70, 0xFE74},
+        .{0xFE76, 0xFEFC},
+        .{0xFF66, 0xFF6F},
+        .{0xFF71, 0xFF9D},
+        .{0xFFA0, 0xFFBE},
+        .{0xFFC2, 0xFFC7},
+        .{0xFFCA, 0xFFCF},
+        .{0xFFD2, 0xFFD7},
+        .{0xFFDA, 0xFFDC},
+    };
+
+const _Mc_ranges = [_][2]u21{
+        .{0x0903, 0x0903},
+        .{0x093B, 0x093B},
+        .{0x093E, 0x0940},
+        .{0x0949, 0x094C},
+        .{0x094E, 0x094E},
+        .{0x0955, 0x0957},
+        .{0x0962, 0x0963},
+        .{0x0982, 0x0983},
+        .{0x09BE, 0x09C0},
+        .{0x09C7, 0x09C8},
+        .{0x09CB, 0x09CC},
+        .{0x09D7, 0x09D7},
+        .{0x0A03, 0x0A03},
+        .{0x0A3E, 0x0A40},
+        .{0x0A83, 0x0A83},
+        .{0x0ABE, 0x0AC0},
+        .{0x0AC9, 0x0AC9},
+        .{0x0ACB, 0x0ACC},
+        .{0x0AD0, 0x0AD0},
+        .{0x0B02, 0x0B03},
+        .{0x0B3E, 0x0B3E},
+        .{0x0B40, 0x0B40},
+        .{0x0B47, 0x0B48},
+        .{0x0B4B, 0x0B4C},
+        .{0x0B57, 0x0B57},
+        .{0x0BBE, 0x0BBF},
+        .{0x0BC1, 0x0BC2},
+        .{0x0BC6, 0x0BC8},
+        .{0x0BCA, 0x0BCC},
+        .{0x0BD7, 0x0BD7},
+        .{0x0C01, 0x0C03},
+        .{0x0C41, 0x0C44},
+        .{0x0C82, 0x0C83},
+        .{0x0CBE, 0x0CBE},
+        .{0x0CC0, 0x0CC4},
+        .{0x0CC7, 0x0CC8},
+        .{0x0CCA, 0x0CCB},
+        .{0x0CD5, 0x0CD6},
+        .{0x0D02, 0x0D03},
+        .{0x0D3E, 0x0D40},
+        .{0x0D46, 0x0D48},
+        .{0x0D4A, 0x0D4C},
+        .{0x0D57, 0x0D57},
+        .{0x0D82, 0x0D83},
+        .{0x0DCF, 0x0DD1},
+        .{0x0DD8, 0x0DDF},
+        .{0x0DF2, 0x0DF3},
+        .{0x0F3E, 0x0F3F},
+        .{0x0F7F, 0x0F7F},
+        .{0x102B, 0x102C},
+        .{0x1031, 0x1031},
+        .{0x1038, 0x1038},
+        .{0x103B, 0x103C},
+        .{0x1056, 0x1057},
+        .{0x1062, 0x1064},
+        .{0x1067, 0x106D},
+        .{0x1083, 0x1084},
+        .{0x1087, 0x108C},
+        .{0x108F, 0x108F},
+        .{0x109A, 0x109C},
+        .{0x17B6, 0x17B6},
+        .{0x17BE, 0x17C5},
+        .{0x17C7, 0x17C8},
+        .{0x1923, 0x1926},
+        .{0x1929, 0x192B},
+        .{0x1930, 0x1931},
+        .{0x1933, 0x1938},
+        .{0x1A19, 0x1A1A},
+        .{0x1A55, 0x1A55},
+        .{0x1A57, 0x1A57},
+        .{0x1A61, 0x1A61},
+        .{0x1A63, 0x1A64},
+        .{0x1A6D, 0x1A72},
+        .{0x1B04, 0x1B04},
+        .{0x1B35, 0x1B35},
+        .{0x1B3B, 0x1B3B},
+        .{0x1B3D, 0x1B41},
+        .{0x1B43, 0x1B44},
+        .{0x1B82, 0x1B82},
+        .{0x1BA1, 0x1BA1},
+        .{0x1BA6, 0x1BA7},
+        .{0x1BAA, 0x1BAA},
+        .{0x1BE7, 0x1BE7},
+        .{0x1BEA, 0x1BEC},
+        .{0x1BEE, 0x1BEE},
+        .{0x1BF2, 0x1BF3},
+        .{0x1C24, 0x1C2B},
+        .{0x1C34, 0x1C35},
+        .{0x1CE1, 0x1CE1},
+        .{0x1CF7, 0x1CF7},
+        .{0xA823, 0xA824},
+        .{0xA827, 0xA827},
+        .{0xA880, 0xA881},
+        .{0xA8B4, 0xA8C3},
+        .{0xA952, 0xA953},
+        .{0xA983, 0xA983},
+        .{0xA9B4, 0xA9B5},
+        .{0xA9BA, 0xA9BB},
+        .{0xA9BD, 0xA9C0},
+        .{0xAA2F, 0xAA30},
+        .{0xAA33, 0xAA34},
+        .{0xAA4D, 0xAA4D},
+        .{0xAA7B, 0xAA7B},
+        .{0xAA7D, 0xAA7D},
+        .{0xAABE, 0xAABF},
+        .{0xAAC0, 0xAAC0},
+        .{0xAAC2, 0xAAC2},
+        .{0xAADB, 0xAADC},
+        .{0xAAF2, 0xAAF2},
+        .{0xAB01, 0xAB06},
+        .{0xAB09, 0xAB0E},
+        .{0xAB11, 0xAB16},
+        .{0xAB20, 0xAB26},
+        .{0xAB28, 0xAB2E},
+        .{0xAB30, 0xAB5A},
+        .{0xAB5C, 0xAB5F},
+        .{0xAB60, 0xAB65},
+    };
+
+const _Zp_ranges = [_][2]u21{
+        .{0x2029, 0x2029},
+    };
+
+const _No_ranges = [_][2]u21{
+        .{0x00B2, 0x00B3},
+        .{0x00B9, 0x00B9},
+        .{0x00BC, 0x00BE},
+        .{0x09F4, 0x09F9},
+        .{0x0B72, 0x0B77},
+        .{0x0BF0, 0x0BF2},
+        .{0x0C78, 0x0C7E},
+        .{0x0D58, 0x0D5E},
+        .{0x0D70, 0x0D78},
+        .{0x0F2A, 0x0F33},
+        .{0x1369, 0x1371},
+        .{0x17F0, 0x17F9},
+        .{0x19DA, 0x19DA},
+        .{0x2070, 0x2070},
+        .{0x2074, 0x2079},
+        .{0x2080, 0x2089},
+        .{0x2150, 0x215F},
+        .{0x2189, 0x2189},
+        .{0x2460, 0x249B},
+        .{0x24EA, 0x24FF},
+        .{0x2776, 0x2793},
+        .{0x2CFD, 0x2CFD},
+        .{0x3192, 0x3195},
+        .{0x3220, 0x3229},
+        .{0x3248, 0x324F},
+        .{0x3251, 0x325F},
+        .{0x3280, 0x3289},
+        .{0x32B1, 0x32BF},
+        .{0xA830, 0xA835},
+    };
+
+const _Sk_ranges = [_][2]u21{
+        .{0x005E, 0x005E},
+        .{0x0060, 0x0060},
+        .{0x00A8, 0x00A8},
+        .{0x00AF, 0x00AF},
+        .{0x00B4, 0x00B4},
+        .{0x00B8, 0x00B8},
+        .{0x02C2, 0x02C5},
+        .{0x02D2, 0x02DF},
+        .{0x02E5, 0x02EB},
+        .{0x02ED, 0x02ED},
+        .{0x02EF, 0x02FF},
+        .{0x0375, 0x0375},
+        .{0x0384, 0x0385},
+        .{0x1FBD, 0x1FBD},
+        .{0x1FBF, 0x1FC1},
+        .{0x1FCD, 0x1FCF},
+        .{0x1FDD, 0x1FDF},
+        .{0x1FED, 0x1FEF},
+        .{0x1FFD, 0x1FFE},
+        .{0x309B, 0x309C},
+        .{0xA700, 0xA716},
+        .{0xA720, 0xA721},
+        .{0xA789, 0xA78A},
+        .{0xAB5B, 0xAB5B},
+        .{0xFBB2, 0xFBC1},
+        .{0xFF3E, 0xFF3E},
+        .{0xFF40, 0xFF40},
+        .{0xFFE3, 0xFFE3},
+    };
+
+const _Me_ranges = [_][2]u21{
+        .{0x0488, 0x0489},
+        .{0x1ABE, 0x1ABE},
+        .{0x20DD, 0x20E0},
+        .{0x20E2, 0x20E4},
+        .{0xA670, 0xA672},
+    };
+
+const _Co_ranges = [_][2]u21{
+        .{0xE000, 0xF8FF},
+        .{0xF0000, 0xFFFFD},
+        .{0x100000, 0x10FFFD},
+    };
+
+const _Po_ranges = [_][2]u21{
+        .{0x0021, 0x0023},
+        .{0x0025, 0x002A},
+        .{0x002C, 0x002C},
+        .{0x002E, 0x002F},
+        .{0x003A, 0x003B},
+        .{0x003F, 0x0040},
+        .{0x005C, 0x005C},
+        .{0x00A1, 0x00A1},
+        .{0x00A7, 0x00A7},
+        .{0x00B6, 0x00B7},
+        .{0x00BF, 0x00BF},
+        .{0x037E, 0x037E},
+        .{0x0387, 0x0387},
+        .{0x055A, 0x055F},
+        .{0x0589, 0x0589},
+        .{0x05C0, 0x05C0},
+        .{0x05C3, 0x05C3},
+        .{0x05C6, 0x05C6},
+        .{0x05F3, 0x05F4},
+        .{0x0609, 0x060A},
+        .{0x060C, 0x060D},
+        .{0x061B, 0x061B},
+        .{0x061E, 0x061F},
+        .{0x066A, 0x066D},
+        .{0x06D4, 0x06D4},
+        .{0x0700, 0x070D},
+        .{0x07F7, 0x07F9},
+        .{0x0830, 0x083E},
+        .{0x085E, 0x085E},
+        .{0x0964, 0x0965},
+        .{0x0970, 0x0970},
+        .{0x09FD, 0x09FD},
+        .{0x0A76, 0x0A76},
+        .{0x0AF0, 0x0AF0},
+        .{0x0C77, 0x0C77},
+        .{0x0C84, 0x0C84},
+        .{0x0DF4, 0x0DF4},
+        .{0x0E4F, 0x0E4F},
+        .{0x0E5A, 0x0E5B},
+        .{0x0F04, 0x0F12},
+        .{0x0F14, 0x0F14},
+        .{0x0F3A, 0x0F3D},
+        .{0x0F85, 0x0F85},
+        .{0x0FD0, 0x0FD4},
+        .{0x0FD9, 0x0FDA},
+        .{0x104A, 0x104F},
+        .{0x10FB, 0x10FB},
+        .{0x1360, 0x1368},
+        .{0x166E, 0x166E},
+        .{0x169B, 0x169C},
+        .{0x16EB, 0x16ED},
+        .{0x1735, 0x1736},
+        .{0x17D4, 0x17D6},
+        .{0x17D8, 0x17DA},
+        .{0x1800, 0x1805},
+        .{0x1807, 0x180A},
+        .{0x1944, 0x1945},
+        .{0x1A1E, 0x1A1F},
+        .{0x1AA0, 0x1AA6},
+        .{0x1AA8, 0x1AAD},
+        .{0x1B5A, 0x1B60},
+        .{0x1BFC, 0x1BFF},
+        .{0x1C3B, 0x1C3F},
+        .{0x1C7E, 0x1C7F},
+        .{0x1CC0, 0x1CC7},
+        .{0x1CD3, 0x1CD3},
+        .{0x2010, 0x2027},
+        .{0x2030, 0x2043},
+        .{0x2045, 0x2051},
+        .{0x2053, 0x205E},
+        .{0x207D, 0x207E},
+        .{0x208D, 0x208E},
+        .{0x2308, 0x230B},
+        .{0x2329, 0x232A},
+        .{0x2768, 0x2775},
+        .{0x27C5, 0x27C6},
+        .{0x27E6, 0x27EF},
+        .{0x2983, 0x2998},
+        .{0x29D8, 0x29DB},
+        .{0x29FC, 0x29FD},
+        .{0x2CF9, 0x2CFC},
+        .{0x2CFE, 0x2CFF},
+        .{0x2D70, 0x2D70},
+        .{0x2E00, 0x2E2E},
+        .{0x2E30, 0x2E4F},
+        .{0x2E52, 0x2E5D},
+        .{0x3001, 0x3003},
+        .{0x303D, 0x303D},
+        .{0x30FB, 0x30FB},
+        .{0xA4FE, 0xA4FF},
+        .{0xA60D, 0xA60F},
+        .{0xA673, 0xA673},
+        .{0xA67E, 0xA67E},
+        .{0xA6F2, 0xA6F7},
+        .{0xA874, 0xA877},
+        .{0xA8CE, 0xA8CF},
+        .{0xA8F8, 0xA8FA},
+        .{0xA8FC, 0xA8FC},
+        .{0xA92E, 0xA92F},
+        .{0xA95F, 0xA95F},
+        .{0xA9C1, 0xA9CD},
+        .{0xA9DE, 0xA9DF},
+        .{0xAA5C, 0xAA5F},
+        .{0xAADE, 0xAADF},
+        .{0xAAF0, 0xAAF1},
+        .{0xABEB, 0xABEB},
+        .{0xFE10, 0xFE19},
+        .{0xFE30, 0xFE52},
+        .{0xFE54, 0xFE61},
+        .{0xFE63, 0xFE63},
+        .{0xFE68, 0xFE68},
+        .{0xFE6A, 0xFE6B},
+        .{0xFF01, 0xFF03},
+        .{0xFF05, 0xFF0A},
+        .{0xFF0C, 0xFF0C},
+        .{0xFF0E, 0xFF0F},
+        .{0xFF1A, 0xFF1B},
+        .{0xFF1F, 0xFF20},
+        .{0xFF3C, 0xFF3C},
+        .{0xFF61, 0xFF61},
+        .{0xFF64, 0xFF65},
+    };
+
+const _Nd_ranges = [_][2]u21{
+        .{0x0030, 0x0039},
+        .{0x0660, 0x0669},
+        .{0x06F0, 0x06F9},
+        .{0x07C0, 0x07C9},
+        .{0x0966, 0x096F},
+        .{0x09E6, 0x09EF},
+        .{0x0A66, 0x0A6F},
+        .{0x0AE6, 0x0AEF},
+        .{0x0B66, 0x0B6F},
+        .{0x0BE6, 0x0BEF},
+        .{0x0C66, 0x0C6F},
+        .{0x0CE6, 0x0CEF},
+        .{0x0D66, 0x0D6F},
+        .{0x0E50, 0x0E59},
+        .{0x0ED0, 0x0ED9},
+        .{0x0F20, 0x0F29},
+        .{0x1040, 0x1049},
+        .{0x1090, 0x1099},
+        .{0x17E0, 0x17E9},
+        .{0x1810, 0x1819},
+        .{0x1946, 0x194F},
+        .{0x19D0, 0x19D9},
+        .{0x1A80, 0x1A89},
+        .{0x1A90, 0x1A99},
+        .{0x1B50, 0x1B59},
+        .{0x1BB0, 0x1BB9},
+        .{0x1C40, 0x1C49},
+        .{0x1C50, 0x1C59},
+        .{0xA620, 0xA629},
+        .{0xA8D0, 0xA8D9},
+        .{0xA900, 0xA909},
+        .{0xA9D0, 0xA9D9},
+        .{0xA9F0, 0xA9F9},
+        .{0xAA50, 0xAA59},
+        .{0xABF0, 0xABF9},
+        .{0xFF10, 0xFF19},
+    };
+
+const _Cc_ranges = [_][2]u21{
+        .{0x0000, 0x001F},
+        .{0x007F, 0x009F},
+    };
+
+const _Zs_ranges = [_][2]u21{
+        .{0x0020, 0x0020},
+        .{0x00A0, 0x00A0},
+        .{0x1680, 0x1680},
+        .{0x2000, 0x200A},
+        .{0x202F, 0x202F},
+        .{0x205F, 0x205F},
+        .{0x3000, 0x3000},
+    };
+
+const _Sm_ranges = [_][2]u21{
+        .{0x002B, 0x002B},
+        .{0x003C, 0x003E},
+        .{0x007C, 0x007C},
+        .{0x007E, 0x007E},
+        .{0x00AC, 0x00AC},
+        .{0x00B1, 0x00B1},
+        .{0x00D7, 0x00D7},
+        .{0x00F7, 0x00F7},
+        .{0x03F6, 0x03F6},
+        .{0x0606, 0x0608},
+        .{0x2044, 0x2044},
+        .{0x2052, 0x2052},
+        .{0x207A, 0x207C},
+        .{0x208A, 0x208C},
+        .{0x2118, 0x2118},
+        .{0x2140, 0x2144},
+        .{0x214B, 0x214B},
+        .{0x2190, 0x2194},
+        .{0x219A, 0x219B},
+        .{0x21A0, 0x21A0},
+        .{0x21A3, 0x21A3},
+        .{0x21A6, 0x21A6},
+        .{0x21AE, 0x21AE},
+        .{0x21CE, 0x21CF},
+        .{0x21D2, 0x21D2},
+        .{0x21D4, 0x21D4},
+        .{0x21F4, 0x22FF},
+        .{0x2320, 0x2321},
+        .{0x237C, 0x237C},
+        .{0x239B, 0x23B3},
+        .{0x23DC, 0x23E1},
+        .{0x25B7, 0x25B7},
+        .{0x25C1, 0x25C1},
+        .{0x25F8, 0x25FF},
+        .{0x266F, 0x266F},
+        .{0x27C0, 0x27C4},
+        .{0x27C7, 0x27E5},
+        .{0x27F0, 0x27FF},
+        .{0x2900, 0x2982},
+        .{0x2999, 0x29D7},
+        .{0x29DC, 0x29FB},
+        .{0x29FE, 0x2AFF},
+        .{0x2B30, 0x2B44},
+        .{0x2B47, 0x2B4C},
+        .{0xFB29, 0xFB29},
+        .{0xFDFC, 0xFDFC},
+        .{0xFE62, 0xFE62},
+        .{0xFE64, 0xFE66},
+        .{0xFF0B, 0xFF0B},
+        .{0xFF1C, 0xFF1E},
+        .{0xFF5C, 0xFF5C},
+        .{0xFF5E, 0xFF5E},
+        .{0xFFE2, 0xFFE2},
+        .{0xFFE9, 0xFFEC},
+    };
+
+const _Pc_ranges = [_][2]u21{
+        .{0x005F, 0x005F},
+        .{0x203F, 0x2040},
+        .{0x2054, 0x2054},
+        .{0xFE33, 0xFE34},
+        .{0xFE4D, 0xFE4F},
+        .{0xFF3F, 0xFF3F},
+    };
+
+const _Lt_ranges = [_][2]u21{
+        .{0x01C5, 0x01C5},
+        .{0x01C8, 0x01C8},
+        .{0x01CB, 0x01CB},
+        .{0x01F2, 0x01F2},
+        .{0x1F88, 0x1F8F},
+        .{0x1F98, 0x1F9F},
+        .{0x1FA8, 0x1FAF},
+        .{0x1FBC, 0x1FBC},
+        .{0x1FCC, 0x1FCC},
+        .{0x1FFC, 0x1FFC},
+    };
+
+const _Pd_ranges = [_][2]u21{
+        .{0x002D, 0x002D},
+        .{0x058A, 0x058A},
+        .{0x05BE, 0x05BE},
+        .{0x1400, 0x1400},
+        .{0x1806, 0x1806},
+        .{0x2010, 0x2015},
+        .{0x2E17, 0x2E17},
+        .{0x2E1A, 0x2E1A},
+        .{0x2E3A, 0x2E3B},
+        .{0x2E40, 0x2E40},
+        .{0x301C, 0x301C},
+        .{0x3030, 0x3030},
+        .{0x30A0, 0x30A0},
+        .{0xFE31, 0xFE32},
+        .{0xFE58, 0xFE58},
+        .{0xFE63, 0xFE63},
+        .{0xFF0D, 0xFF0D},
+    };
+
+const _Lu_ranges = [_][2]u21{
+        .{0x0041, 0x005A},
+        .{0x00C0, 0x00D6},
+        .{0x00D8, 0x00DE},
+        .{0x0386, 0x0386},
+        .{0x0388, 0x038A},
+        .{0x0391, 0x03A1},
+        .{0x03A3, 0x03AB},
+        .{0x0401, 0x040C},
+        .{0x040E, 0x042F},
+        .{0x1F08, 0x1F0F},
+        .{0x1F18, 0x1F1D},
+        .{0x1F28, 0x1F2F},
+        .{0x1F38, 0x1F3F},
+        .{0x1F48, 0x1F4D},
+        .{0x1F59, 0x1F59},
+        .{0x1F5B, 0x1F5B},
+        .{0x1F5D, 0x1F5D},
+        .{0x1F5F, 0x1F5F},
+        .{0x1F68, 0x1F6F},
+        .{0x1FB8, 0x1FBB},
+        .{0x1FC8, 0x1FCB},
+        .{0x1FD8, 0x1FDB},
+        .{0x1FE8, 0x1FEC},
+        .{0x1FF8, 0x1FFB},
+    };
+
+const _So_ranges = [_][2]u21{
+        .{0x00A6, 0x00A7},
+        .{0x00A9, 0x00A9},
+        .{0x00AE, 0x00AE},
+        .{0x00B0, 0x00B0},
+        .{0x0482, 0x0482},
+        .{0x060E, 0x060F},
+        .{0x06DE, 0x06DE},
+        .{0x06E9, 0x06E9},
+        .{0x06FD, 0x06FE},
+        .{0x07F6, 0x07F6},
+        .{0x09FA, 0x09FA},
+        .{0x0B70, 0x0B70},
+        .{0x0BF3, 0x0BF8},
+        .{0x0BFA, 0x0BFA},
+        .{0x0C7F, 0x0C7F},
+        .{0x0D4F, 0x0D4F},
+        .{0x0D79, 0x0D79},
+        .{0x0F01, 0x0F03},
+        .{0x0F13, 0x0F17},
+        .{0x0F1A, 0x0F1F},
+        .{0x0F34, 0x0F34},
+        .{0x0F36, 0x0F36},
+        .{0x0F38, 0x0F38},
+        .{0x0FBE, 0x0FC5},
+        .{0x0FC7, 0x0FCC},
+        .{0x0FCE, 0x0FD4},
+        .{0x0FD9, 0x0FDA},
+        .{0x109E, 0x109F},
+        .{0x1360, 0x1360},
+        .{0x1390, 0x1399},
+        .{0x1940, 0x1940},
+        .{0x19DE, 0x19FF},
+        .{0x1B61, 0x1B6A},
+        .{0x1B74, 0x1B7C},
+        .{0x2100, 0x2101},
+        .{0x2103, 0x2106},
+        .{0x2108, 0x2109},
+        .{0x2114, 0x2114},
+        .{0x2116, 0x2117},
+        .{0x211E, 0x2123},
+        .{0x2125, 0x2125},
+        .{0x2127, 0x2127},
+        .{0x2129, 0x2129},
+        .{0x212E, 0x212E},
+        .{0x213A, 0x213B},
+        .{0x214A, 0x214A},
+        .{0x214C, 0x214D},
+        .{0x214F, 0x214F},
+        .{0x2195, 0x2199},
+        .{0x219C, 0x219F},
+        .{0x21A1, 0x21A2},
+        .{0x21A4, 0x21A5},
+        .{0x21A7, 0x21AD},
+        .{0x21AF, 0x21CD},
+        .{0x21D0, 0x21D1},
+        .{0x21D3, 0x21D3},
+        .{0x21D5, 0x21F3},
+        .{0x2300, 0x231F},
+        .{0x2322, 0x2328},
+        .{0x232B, 0x237B},
+        .{0x237D, 0x239A},
+        .{0x23B4, 0x23DB},
+        .{0x23E2, 0x2426},
+        .{0x2440, 0x244A},
+        .{0x249C, 0x24E9},
+        .{0x2500, 0x25B6},
+        .{0x25B8, 0x25C0},
+        .{0x25C2, 0x25F7},
+        .{0x2600, 0x266E},
+        .{0x2670, 0x2775},
+        .{0x2794, 0x27BF},
+        .{0x2800, 0x28FF},
+        .{0x2B00, 0x2B2F},
+        .{0x2B45, 0x2B46},
+        .{0x2B50, 0x2B59},
+        .{0x2CE5, 0x2CEA},
+        .{0x2E80, 0x2E99},
+        .{0x2E9B, 0x2EF3},
+        .{0x2F00, 0x2FD5},
+        .{0x2FF0, 0x2FFB},
+        .{0x3004, 0x3004},
+        .{0x3012, 0x3013},
+        .{0x3020, 0x3020},
+        .{0x3036, 0x3037},
+        .{0x303E, 0x303F},
+        .{0x3190, 0x3191},
+        .{0x3196, 0x319F},
+        .{0x31C0, 0x31E3},
+        .{0x3200, 0x321E},
+        .{0x322A, 0x3247},
+        .{0x3250, 0x3250},
+        .{0x3260, 0x327F},
+        .{0x328A, 0x32B0},
+        .{0x32C0, 0x32FE},
+        .{0x3300, 0x33FF},
+        .{0x4DC0, 0x4DFF},
+        .{0xA490, 0xA4C6},
+        .{0xA828, 0xA82B},
+        .{0xA836, 0xA837},
+        .{0xAA77, 0xAA79},
+        .{0xFDFD, 0xFDFD},
+        .{0xFFFC, 0xFFFD},
+    };
+
+const _Pe_ranges = [_][2]u21{
+        .{0x0029, 0x0029},
+        .{0x005D, 0x005D},
+        .{0x007D, 0x007D},
+        .{0x0F3B, 0x0F3B},
+        .{0x0F3D, 0x0F3D},
+        .{0x169C, 0x169C},
+        .{0x2046, 0x2046},
+        .{0x207E, 0x207E},
+        .{0x208E, 0x208E},
+        .{0x2309, 0x2309},
+        .{0x230B, 0x230B},
+        .{0x232A, 0x232A},
+        .{0x2769, 0x2769},
+        .{0x276B, 0x276B},
+        .{0x276D, 0x276D},
+        .{0x276F, 0x276F},
+        .{0x2771, 0x2771},
+        .{0x2773, 0x2773},
+        .{0x2775, 0x2775},
+        .{0x27C6, 0x27C6},
+        .{0x27E7, 0x27E7},
+        .{0x27E9, 0x27E9},
+        .{0x27EB, 0x27EB},
+        .{0x27ED, 0x27ED},
+        .{0x27EF, 0x27EF},
+        .{0x2984, 0x2984},
+        .{0x2986, 0x2986},
+        .{0x2988, 0x2988},
+        .{0x298A, 0x298A},
+        .{0x298C, 0x298C},
+        .{0x298E, 0x298E},
+        .{0x2990, 0x2990},
+        .{0x2992, 0x2992},
+        .{0x2994, 0x2994},
+        .{0x2996, 0x2996},
+        .{0x2998, 0x2998},
+        .{0x29D9, 0x29D9},
+        .{0x29DB, 0x29DB},
+        .{0x29FD, 0x29FD},
+        .{0x2E23, 0x2E23},
+        .{0x2E25, 0x2E25},
+        .{0x2E27, 0x2E27},
+        .{0x2E29, 0x2E29},
+        .{0x3009, 0x3009},
+        .{0x300B, 0x300B},
+        .{0x300D, 0x300D},
+        .{0x300F, 0x300F},
+        .{0x3011, 0x3011},
+        .{0x3015, 0x3015},
+        .{0x3017, 0x3017},
+        .{0x3019, 0x3019},
+        .{0x301B, 0x301B},
+        .{0x301E, 0x301F},
+        .{0xFD3E, 0xFD3E},
+        .{0xFE18, 0xFE18},
+        .{0xFE36, 0xFE36},
+        .{0xFE38, 0xFE38},
+        .{0xFE3A, 0xFE3A},
+        .{0xFE3C, 0xFE3C},
+        .{0xFE3E, 0xFE3E},
+        .{0xFE40, 0xFE40},
+        .{0xFE42, 0xFE42},
+        .{0xFE44, 0xFE44},
+        .{0xFE48, 0xFE48},
+        .{0xFE5A, 0xFE5A},
+        .{0xFE5C, 0xFE5C},
+        .{0xFE5E, 0xFE5E},
+        .{0xFF09, 0xFF09},
+        .{0xFF3D, 0xFF3D},
+        .{0xFF5D, 0xFF5D},
+        .{0xFF60, 0xFF60},
+        .{0xFF63, 0xFF63},
+    };
 
 fn isUnicodeProperty(cp: u21, property: []const u8) bool {
     // Fast path for ASCII characters
@@ -300,1497 +1839,101 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
         }
     }
     // Slow path for non-ASCII or unhandled properties
-    if (property.len == 1 and property[0] == 'L') {
-        // Letter: includes all letter subcategories
-        return isUnicodeProperty(cp, "Lu") or
-               isUnicodeProperty(cp, "Ll") or
-               isUnicodeProperty(cp, "Lt") or
-               isUnicodeProperty(cp, "Lm") or
-               isUnicodeProperty(cp, "Lo");
-    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'u') {
-        // Uppercase Letter
-        return (cp >= 0x0041 and cp <= 0x005A) or
-               (cp >= 0x00C0 and cp <= 0x00D6) or
-               (cp >= 0x00D8 and cp <= 0x00DE) or
-               (cp >= 0x0100 and cp <= 0x0136 and cp % 2 == 0) or
-               (cp >= 0x0139 and cp <= 0x0147 and cp % 2 == 1) or
-               (cp >= 0x014A and cp <= 0x0176 and cp % 2 == 0) or
-               (cp >= 0x0386 and cp <= 0x0386) or
-               (cp >= 0x0388 and cp <= 0x038A) or
-               (cp >= 0x0391 and cp <= 0x03A1) or
-               (cp >= 0x03A3 and cp <= 0x03AB) or
-               (cp >= 0x0401 and cp <= 0x040C) or
-               (cp >= 0x040E and cp <= 0x042F) or
-               (cp >= 0x1F08 and cp <= 0x1F0F) or
-               (cp >= 0x1F18 and cp <= 0x1F1D) or
-               (cp >= 0x1F28 and cp <= 0x1F2F) or
-               (cp >= 0x1F38 and cp <= 0x1F3F) or
-               (cp >= 0x1F48 and cp <= 0x1F4D) or
-               (cp >= 0x1F59 and cp <= 0x1F59) or
-               (cp >= 0x1F5B and cp <= 0x1F5B) or
-               (cp >= 0x1F5D and cp <= 0x1F5D) or
-               (cp >= 0x1F5F and cp <= 0x1F5F) or
-               (cp >= 0x1F68 and cp <= 0x1F6F) or
-               (cp >= 0x1FB8 and cp <= 0x1FBB) or
-               (cp >= 0x1FC8 and cp <= 0x1FCB) or
-               (cp >= 0x1FD8 and cp <= 0x1FDB) or
-               (cp >= 0x1FE8 and cp <= 0x1FEC) or
-               (cp >= 0x1FF8 and cp <= 0x1FFB);
-    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'l') {
-        // Lowercase Letter
-        return (cp >= 0x0061 and cp <= 0x007A) or
-               (cp >= 0x00DF and cp <= 0x00F6) or
-               (cp >= 0x00F8 and cp <= 0x00FF) or
-               (cp >= 0x0101 and cp <= 0x0137 and cp % 2 == 1) or
-               (cp >= 0x0138 and cp <= 0x0138) or
-               (cp >= 0x013A and cp <= 0x0148 and cp % 2 == 0) or
-               (cp >= 0x0149 and cp <= 0x0149) or
-               (cp >= 0x014B and cp <= 0x0177 and cp % 2 == 1) or
-               (cp >= 0x017A and cp <= 0x017E and cp % 2 == 0) or
-               (cp >= 0x03AC and cp <= 0x03CE) or
-               (cp >= 0x0430 and cp <= 0x044F) or
-               (cp >= 0x0451 and cp <= 0x045C) or
-               (cp >= 0x045E and cp <= 0x045F) or
-               (cp >= 0x1F00 and cp <= 0x1F07) or
-               (cp >= 0x1F10 and cp <= 0x1F15) or
-               (cp >= 0x1F20 and cp <= 0x1F27) or
-               (cp >= 0x1F30 and cp <= 0x1F37) or
-               (cp >= 0x1F40 and cp <= 0x1F45) or
-               (cp >= 0x1F50 and cp <= 0x1F57) or
-               (cp >= 0x1F60 and cp <= 0x1F67) or
-               (cp >= 0x1F70 and cp <= 0x1F7D) or
-               (cp >= 0x1F80 and cp <= 0x1F87) or
-               (cp >= 0x1F90 and cp <= 0x1F97) or
-               (cp >= 0x1FA0 and cp <= 0x1FA7) or
-               (cp >= 0x1FB0 and cp <= 0x1FB1) or
-               (cp >= 0x1FD0 and cp <= 0x1FD1) or
-               (cp >= 0x1FE0 and cp <= 0x1FE1) or
-               (cp >= 0x214E and cp <= 0x214E) or
-               (cp >= 0x2170 and cp <= 0x217F);
-    } else if (property.len == 2 and property[0] == 'L' and property[1] == 't') {
-        // Titlecase Letter
-        return (cp >= 0x01C5 and cp <= 0x01C5) or
-               (cp >= 0x01C8 and cp <= 0x01C8) or
-               (cp >= 0x01CB and cp <= 0x01CB) or
-               (cp >= 0x01F2 and cp <= 0x01F2) or
-               (cp >= 0x1F88 and cp <= 0x1F8F) or
-               (cp >= 0x1F98 and cp <= 0x1F9F) or
-               (cp >= 0x1FA8 and cp <= 0x1FAF) or
-               (cp >= 0x1FBC and cp <= 0x1FBC) or
-               (cp >= 0x1FCC and cp <= 0x1FCC) or
-               (cp >= 0x1FFC and cp <= 0x1FFC);
-    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'm') {
-        // Modifier Letter
-        return (cp >= 0x02B0 and cp <= 0x02C1) or
-               (cp >= 0x02C6 and cp <= 0x02D1) or
-               (cp >= 0x02E0 and cp <= 0x02E4) or
-               (cp >= 0x02EC and cp <= 0x02EC) or
-               (cp >= 0x02EE and cp <= 0x02EE) or
-               (cp >= 0x0374 and cp <= 0x0374) or
-               (cp >= 0x037A and cp <= 0x037A) or
-               (cp >= 0x0559 and cp <= 0x0559) or
-               (cp >= 0x0640 and cp <= 0x0640) or
-               (cp >= 0x06E5 and cp <= 0x06E6) or
-               (cp >= 0x07F4 and cp <= 0x07F5) or
-               (cp >= 0x07FA and cp <= 0x07FA) or
-               (cp >= 0x0E46 and cp <= 0x0E46) or
-               (cp >= 0x0EC6 and cp <= 0x0EC6) or
-               (cp >= 0x10FC and cp <= 0x10FC) or
-               (cp >= 0x17D7 and cp <= 0x17D7) or
-               (cp >= 0x1843 and cp <= 0x1843) or
-               (cp >= 0x1D2C and cp <= 0x1D6A) or
-               (cp >= 0x1D78 and cp <= 0x1D78) or
-               (cp >= 0x1D9B and cp <= 0x1DBF) or
-               (cp >= 0x2071 and cp <= 0x2071) or
-               (cp >= 0x207F and cp <= 0x207F) or
-               (cp >= 0x2090 and cp <= 0x209C) or
-               (cp >= 0x2C7C and cp <= 0x2C7D) or
-               (cp >= 0x2D6F and cp <= 0x2D6F) or
-               (cp >= 0x2E2F and cp <= 0x2E2F) or
-               (cp >= 0x3005 and cp <= 0x3005) or
-               (cp >= 0x3031 and cp <= 0x3035) or
-               (cp >= 0x303B and cp <= 0x303B) or
-               (cp >= 0x309D and cp <= 0x309E) or
-               (cp >= 0x30FC and cp <= 0x30FE) or
-               (cp >= 0xA015 and cp <= 0xA015) or
-               (cp >= 0xA4F8 and cp <= 0xA4FD) or
-               (cp >= 0xA60C and cp <= 0xA60C) or
-               (cp >= 0xA67F and cp <= 0xA67F) or
-               (cp >= 0xA69C and cp <= 0xA69D) or
-               (cp >= 0xA717 and cp <= 0xA71F) or
-               (cp >= 0xA770 and cp <= 0xA770) or
-               (cp >= 0xA788 and cp <= 0xA788) or
-               (cp >= 0xA7F8 and cp <= 0xA7F9) or
-               (cp >= 0xA9CF and cp <= 0xA9CF) or
-               (cp >= 0xAA70 and cp <= 0xAA70) or
-               (cp >= 0xAADD and cp <= 0xAADD) or
-               (cp >= 0xAAF3 and cp <= 0xAAF4) or
-               (cp >= 0xFF70 and cp <= 0xFF70) or
-               (cp >= 0xFF9E and cp <= 0xFF9F);
-    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'o') {
-        // Other Letter
-        return (cp >= 0x01BB and cp <= 0x01BB) or
-               (cp >= 0x01C0 and cp <= 0x01C3) or
-               (cp >= 0x0294 and cp <= 0x0294) or
-               (cp >= 0x05D0 and cp <= 0x05EA) or
-               (cp >= 0x05F0 and cp <= 0x05F2) or
-               (cp >= 0x0621 and cp <= 0x063F) or
-               (cp >= 0x0641 and cp <= 0x064A) or
-               (cp >= 0x066E and cp <= 0x066F) or
-               (cp >= 0x0671 and cp <= 0x06D3) or
-               (cp >= 0x06D5 and cp <= 0x06D5) or
-               (cp >= 0x06EE and cp <= 0x06EF) or
-               (cp >= 0x06FA and cp <= 0x06FC) or
-               (cp >= 0x06FF and cp <= 0x06FF) or
-               (cp >= 0x0710 and cp <= 0x0710) or
-               (cp >= 0x0712 and cp <= 0x072F) or
-               (cp >= 0x074D and cp <= 0x07A5) or
-               (cp >= 0x07B1 and cp <= 0x07B1) or
-               (cp >= 0x07CA and cp <= 0x07EA) or
-               (cp >= 0x0800 and cp <= 0x0815) or
-               (cp >= 0x0840 and cp <= 0x0858) or
-               (cp >= 0x08A0 and cp <= 0x08AC) or
-               (cp >= 0x0904 and cp <= 0x0939) or
-               (cp >= 0x093D and cp <= 0x093D) or
-               (cp >= 0x0950 and cp <= 0x0950) or
-               (cp >= 0x0958 and cp <= 0x0961) or
-               (cp >= 0x0972 and cp <= 0x0980) or
-               (cp >= 0x0985 and cp <= 0x098C) or
-               (cp >= 0x098F and cp <= 0x0990) or
-               (cp >= 0x0993 and cp <= 0x09A8) or
-               (cp >= 0x09AA and cp <= 0x09B0) or
-               (cp >= 0x09B2 and cp <= 0x09B2) or
-               (cp >= 0x09B6 and cp <= 0x09B9) or
-               (cp >= 0x09BD and cp <= 0x09BD) or
-               (cp >= 0x09CE and cp <= 0x09CE) or
-               (cp >= 0x09DC and cp <= 0x09DD) or
-               (cp >= 0x09DF and cp <= 0x09E1) or
-               (cp >= 0x09F0 and cp <= 0x09F1) or
-               (cp >= 0x0A05 and cp <= 0x0A0A) or
-               (cp >= 0x0A0F and cp <= 0x0A10) or
-               (cp >= 0x0A13 and cp <= 0x0A28) or
-               (cp >= 0x0A2A and cp <= 0x0A30) or
-               (cp >= 0x0A32 and cp <= 0x0A33) or
-               (cp >= 0x0A35 and cp <= 0x0A36) or
-               (cp >= 0x0A38 and cp <= 0x0A39) or
-               (cp >= 0x0A59 and cp <= 0x0A5C) or
-               (cp >= 0x0A5E and cp <= 0x0A5E) or
-               (cp >= 0x0A72 and cp <= 0x0A74) or
-               (cp >= 0x0A85 and cp <= 0x0A8D) or
-               (cp >= 0x0A8F and cp <= 0x0A91) or
-               (cp >= 0x0A93 and cp <= 0x0AA8) or
-               (cp >= 0x0AAA and cp <= 0x0AB0) or
-               (cp >= 0x0AB2 and cp <= 0x0AB3) or
-               (cp >= 0x0AB5 and cp <= 0x0AB9) or
-               (cp >= 0x0ABD and cp <= 0x0ABD) or
-               (cp >= 0x0AD0 and cp <= 0x0AD0) or
-               (cp >= 0x0AE0 and cp <= 0x0AE1) or
-               (cp >= 0x0B05 and cp <= 0x0B0C) or
-               (cp >= 0x0B0F and cp <= 0x0B10) or
-               (cp >= 0x0B13 and cp <= 0x0B28) or
-               (cp >= 0x0B2A and cp <= 0x0B30) or
-               (cp >= 0x0B32 and cp <= 0x0B33) or
-               (cp >= 0x0B35 and cp <= 0x0B39) or
-               (cp >= 0x0B3D and cp <= 0x0B3D) or
-               (cp >= 0x0B5C and cp <= 0x0B5D) or
-               (cp >= 0x0B5F and cp <= 0x0B61) or
-               (cp >= 0x0B71 and cp <= 0x0B71) or
-               (cp >= 0x0B83 and cp <= 0x0B83) or
-               (cp >= 0x0B85 and cp <= 0x0B8A) or
-               (cp >= 0x0B8E and cp <= 0x0B90) or
-               (cp >= 0x0B92 and cp <= 0x0B95) or
-               (cp >= 0x0B99 and cp <= 0x0B9A) or
-               (cp >= 0x0B9C and cp <= 0x0B9C) or
-               (cp >= 0x0B9E and cp <= 0x0B9F) or
-               (cp >= 0x0BA3 and cp <= 0x0BA4) or
-               (cp >= 0x0BA8 and cp <= 0x0BAA) or
-               (cp >= 0x0BAE and cp <= 0x0BB9) or
-               (cp >= 0x0BD0 and cp <= 0x0BD0) or
-               (cp >= 0x0C05 and cp <= 0x0C0C) or
-               (cp >= 0x0C0E and cp <= 0x0C10) or
-               (cp >= 0x0C12 and cp <= 0x0C28) or
-               (cp >= 0x0C2A and cp <= 0x0C39) or
-               (cp >= 0x0C3D and cp <= 0x0C3D) or
-               (cp >= 0x0C58 and cp <= 0x0C5A) or
-               (cp >= 0x0C60 and cp <= 0x0C61) or
-               (cp >= 0x0C85 and cp <= 0x0C8C) or
-               (cp >= 0x0C8E and cp <= 0x0C90) or
-               (cp >= 0x0C92 and cp <= 0x0CA8) or
-               (cp >= 0x0CAA and cp <= 0x0CB3) or
-               (cp >= 0x0CB5 and cp <= 0x0CB9) or
-               (cp >= 0x0CBD and cp <= 0x0CBD) or
-               (cp >= 0x0CDE and cp <= 0x0CDE) or
-               (cp >= 0x0CE0 and cp <= 0x0CE1) or
-               (cp >= 0x0CF1 and cp <= 0x0CF2) or
-               (cp >= 0x0D05 and cp <= 0x0D0C) or
-               (cp >= 0x0D0E and cp <= 0x0D10) or
-               (cp >= 0x0D12 and cp <= 0x0D3A) or
-               (cp >= 0x0D3D and cp <= 0x0D3D) or
-               (cp >= 0x0D4E and cp <= 0x0D4E) or
-               (cp >= 0x0D5F and cp <= 0x0D61) or
-               (cp >= 0x0D7A and cp <= 0x0D7F) or
-               (cp >= 0x0D85 and cp <= 0x0D96) or
-               (cp >= 0x0D9A and cp <= 0x0DB1) or
-               (cp >= 0x0DB3 and cp <= 0x0DBB) or
-               (cp >= 0x0DBD and cp <= 0x0DBD) or
-               (cp >= 0x0DC0 and cp <= 0x0DC6) or
-               (cp >= 0x0E01 and cp <= 0x0E30) or
-               (cp >= 0x0E32 and cp <= 0x0E33) or
-               (cp >= 0x0E40 and cp <= 0x0E46) or
-               (cp >= 0x0E81 and cp <= 0x0E82) or
-               (cp >= 0x0E84 and cp <= 0x0E84) or
-               (cp >= 0x0E87 and cp <= 0x0E88) or
-               (cp >= 0x0E8A and cp <= 0x0E8A) or
-               (cp >= 0x0E8D and cp <= 0x0E8D) or
-               (cp >= 0x0E94 and cp <= 0x0E97) or
-               (cp >= 0x0E99 and cp <= 0x0E9F) or
-               (cp >= 0x0EA1 and cp <= 0x0EA3) or
-               (cp >= 0x0EA5 and cp <= 0x0EA5) or
-               (cp >= 0x0EA7 and cp <= 0x0EA7) or
-               (cp >= 0x0EAA and cp <= 0x0EAB) or
-               (cp >= 0x0EAD and cp <= 0x0EB0) or
-               (cp >= 0x0EB2 and cp <= 0x0EB3) or
-               (cp >= 0x0EBD and cp <= 0x0EBD) or
-               (cp >= 0x0EC0 and cp <= 0x0EC4) or
-               (cp >= 0x0EC6 and cp <= 0x0EC6) or
-               (cp >= 0x0EDC and cp <= 0x0EDF) or
-               (cp >= 0x0F00 and cp <= 0x0F00) or
-               (cp >= 0x0F40 and cp <= 0x0F47) or
-               (cp >= 0x0F49 and cp <= 0x0F6C) or
-               (cp >= 0x0F88 and cp <= 0x0F8C) or
-               (cp >= 0x1000 and cp <= 0x102A) or
-               (cp >= 0x103F and cp <= 0x103F) or
-               (cp >= 0x1050 and cp <= 0x1055) or
-               (cp >= 0x105A and cp <= 0x105D) or
-               (cp >= 0x1061 and cp <= 0x1061) or
-               (cp >= 0x1065 and cp <= 0x1066) or
-               (cp >= 0x106E and cp <= 0x1070) or
-               (cp >= 0x1075 and cp <= 0x1081) or
-               (cp >= 0x108E and cp <= 0x108E) or
-               (cp >= 0x10A0 and cp <= 0x10C5) or
-               (cp >= 0x10C7 and cp <= 0x10C7) or
-               (cp >= 0x10CD and cp <= 0x10CD) or
-               (cp >= 0x10D0 and cp <= 0x10FA) or
-               (cp >= 0x10FC and cp <= 0x1248) or
-               (cp >= 0x124A and cp <= 0x124D) or
-               (cp >= 0x1250 and cp <= 0x1256) or
-               (cp >= 0x1258 and cp <= 0x1258) or
-               (cp >= 0x125A and cp <= 0x125D) or
-               (cp >= 0x1260 and cp <= 0x1288) or
-               (cp >= 0x128A and cp <= 0x128D) or
-               (cp >= 0x1290 and cp <= 0x12B0) or
-               (cp >= 0x12B2 and cp <= 0x12B5) or
-               (cp >= 0x12B8 and cp <= 0x12BE) or
-               (cp >= 0x12C0 and cp <= 0x12C0) or
-               (cp >= 0x12C2 and cp <= 0x12C5) or
-               (cp >= 0x12C8 and cp <= 0x12D6) or
-               (cp >= 0x12D8 and cp <= 0x1310) or
-               (cp >= 0x1312 and cp <= 0x1315) or
-               (cp >= 0x1318 and cp <= 0x135A) or
-               (cp >= 0x1380 and cp <= 0x138F) or
-               (cp >= 0x13A0 and cp <= 0x13F5) or
-               (cp >= 0x13F8 and cp <= 0x13FD) or
-               (cp >= 0x1401 and cp <= 0x166C) or
-               (cp >= 0x166F and cp <= 0x167F) or
-               (cp >= 0x1681 and cp <= 0x169A) or
-               (cp >= 0x16A0 and cp <= 0x16EA) or
-               (cp >= 0x16EE and cp <= 0x16F0) or
-               (cp >= 0x1700 and cp <= 0x170C) or
-               (cp >= 0x170E and cp <= 0x1711) or
-               (cp >= 0x1720 and cp <= 0x1731) or
-               (cp >= 0x1740 and cp <= 0x1751) or
-               (cp >= 0x1760 and cp <= 0x176C) or
-               (cp >= 0x176E and cp <= 0x1770) or
-               (cp >= 0x1780 and cp <= 0x17B3) or
-               (cp >= 0x17D7 and cp <= 0x17D7) or
-               (cp >= 0x17DC and cp <= 0x17DC) or
-               (cp >= 0x1820 and cp <= 0x1877) or
-               (cp >= 0x1880 and cp <= 0x1884) or
-               (cp >= 0x1887 and cp <= 0x18A8) or
-               (cp >= 0x18AA and cp <= 0x18AA) or
-               (cp >= 0x18B0 and cp <= 0x18F5) or
-               (cp >= 0x1900 and cp <= 0x191E) or
-               (cp >= 0x1950 and cp <= 0x196D) or
-               (cp >= 0x1970 and cp <= 0x1974) or
-               (cp >= 0x1980 and cp <= 0x19AB) or
-               (cp >= 0x19C1 and cp <= 0x19C7) or
-               (cp >= 0x1A00 and cp <= 0x1A16) or
-               (cp >= 0x1A20 and cp <= 0x1A54) or
-               (cp >= 0x1AA7 and cp <= 0x1AA7) or
-               (cp >= 0x1B05 and cp <= 0x1B33) or
-               (cp >= 0x1B45 and cp <= 0x1B4B) or
-               (cp >= 0x1B83 and cp <= 0x1BA0) or
-               (cp >= 0x1BAE and cp <= 0x1BAF) or
-               (cp >= 0x1BBA and cp <= 0x1BE5) or
-               (cp >= 0x1C00 and cp <= 0x1C23) or
-               (cp >= 0x1C4D and cp <= 0x1C4F) or
-               (cp >= 0x1C5A and cp <= 0x1C7D) or
-               (cp >= 0x1C80 and cp <= 0x1C88) or
-               (cp >= 0x1CE9 and cp <= 0x1CEC) or
-               (cp >= 0x1CEE and cp <= 0x1CF1) or
-               (cp >= 0x1CF5 and cp <= 0x1CF6) or
-               (cp >= 0x1D00 and cp <= 0x1DBF) or
-               (cp >= 0x1E00 and cp <= 0x1F15) or
-               (cp >= 0x1F18 and cp <= 0x1F1D) or
-               (cp >= 0x1F20 and cp <= 0x1F45) or
-               (cp >= 0x1F48 and cp <= 0x1F4D) or
-               (cp >= 0x1F50 and cp <= 0x1F57) or
-               (cp >= 0x1F59 and cp <= 0x1F59) or
-               (cp >= 0x1F5B and cp <= 0x1F5B) or
-               (cp >= 0x1F5D and cp <= 0x1F5D) or
-               (cp >= 0x1F5F and cp <= 0x1F7D) or
-               (cp >= 0x1F80 and cp <= 0x1FB4) or
-               (cp >= 0x1FB6 and cp <= 0x1FBC) or
-               (cp >= 0x1FBE and cp <= 0x1FBE) or
-               (cp >= 0x1FC2 and cp <= 0x1FC4) or
-               (cp >= 0x1FC6 and cp <= 0x1FCC) or
-               (cp >= 0x1FD0 and cp <= 0x1FD3) or
-               (cp >= 0x1FD6 and cp <= 0x1FDB) or
-               (cp >= 0x1FE0 and cp <= 0x1FEC) or
-               (cp >= 0x1FF2 and cp <= 0x1FF4) or
-               (cp >= 0x1FF6 and cp <= 0x1FFC) or
-               (cp >= 0x2071 and cp <= 0x2071) or
-               (cp >= 0x207F and cp <= 0x207F) or
-               (cp >= 0x2090 and cp <= 0x209C) or
-               (cp >= 0x2102 and cp <= 0x2102) or
-               (cp >= 0x2107 and cp <= 0x2107) or
-               (cp >= 0x210A and cp <= 0x2113) or
-               (cp >= 0x2115 and cp <= 0x2115) or
-               (cp >= 0x2119 and cp <= 0x211D) or
-               (cp >= 0x2124 and cp <= 0x2124) or
-               (cp >= 0x2126 and cp <= 0x2126) or
-               (cp >= 0x2128 and cp <= 0x2128) or
-               (cp >= 0x212A and cp <= 0x212D) or
-               (cp >= 0x212F and cp <= 0x2139) or
-               (cp >= 0x213C and cp <= 0x213F) or
-               (cp >= 0x2145 and cp <= 0x2149) or
-               (cp >= 0x214E and cp <= 0x214E) or
-               (cp >= 0x2183 and cp <= 0x2184) or
-               (cp >= 0x2C00 and cp <= 0x2C2E) or
-               (cp >= 0x2C30 and cp <= 0x2C5E) or
-               (cp >= 0x2C60 and cp <= 0x2CE4) or
-               (cp >= 0x2CEB and cp <= 0x2CEE) or
-               (cp >= 0x2CF2 and cp <= 0x2CF3) or
-               (cp >= 0x2D00 and cp <= 0x2D25) or
-               (cp >= 0x2D27 and cp <= 0x2D27) or
-               (cp >= 0x2D2D and cp <= 0x2D2D) or
-               (cp >= 0x2D30 and cp <= 0x2D67) or
-               (cp >= 0x2D6F and cp <= 0x2D6F) or
-               (cp >= 0x2D80 and cp <= 0x2D96) or
-               (cp >= 0x2DA0 and cp <= 0x2DA6) or
-               (cp >= 0x2DA8 and cp <= 0x2DAE) or
-               (cp >= 0x2DB0 and cp <= 0x2DB6) or
-               (cp >= 0x2DB8 and cp <= 0x2DBE) or
-               (cp >= 0x2DC0 and cp <= 0x2DC6) or
-               (cp >= 0x2DC8 and cp <= 0x2DCE) or
-               (cp >= 0x2DD0 and cp <= 0x2DD6) or
-               (cp >= 0x2DD8 and cp <= 0x2DDE) or
-               (cp >= 0x2E2F and cp <= 0x2E2F) or
-               (cp >= 0x3005 and cp <= 0x3005) or
-               (cp >= 0x3007 and cp <= 0x3007) or
-               (cp >= 0x3021 and cp <= 0x3029) or
-               (cp >= 0x3031 and cp <= 0x3035) or
-               (cp >= 0x3038 and cp <= 0x303A) or
-               (cp >= 0x303B and cp <= 0x303B) or
-               (cp >= 0x303C and cp <= 0x303C) or
-               (cp >= 0x3041 and cp <= 0x3096) or
-               (cp >= 0x309D and cp <= 0x309F) or
-               (cp >= 0x30A1 and cp <= 0x30FA) or
-               (cp >= 0x30FC and cp <= 0x30FF) or
-               (cp >= 0x3105 and cp <= 0x312D) or
-               (cp >= 0x3131 and cp <= 0x318E) or
-               (cp >= 0x31A0 and cp <= 0x31BA) or
-               (cp >= 0x31F0 and cp <= 0x31FF) or
-               (cp >= 0x3400 and cp <= 0x4DB5) or
-               (cp >= 0x4E00 and cp <= 0x9FCC) or
-               (cp >= 0xA000 and cp <= 0xA48C) or
-               (cp >= 0xA4D0 and cp <= 0xA4FD) or
-               (cp >= 0xA500 and cp <= 0xA60C) or
-               (cp >= 0xA610 and cp <= 0xA61F) or
-               (cp >= 0xA62A and cp <= 0xA62B) or
-               (cp >= 0xA640 and cp <= 0xA66E) or
-               (cp >= 0xA67F and cp <= 0xA697) or
-               (cp >= 0xA6A0 and cp <= 0xA6E5) or
-               (cp >= 0xA717 and cp <= 0xA71F) or
-               (cp >= 0xA722 and cp <= 0xA788) or
-               (cp >= 0xA78B and cp <= 0xA78E) or
-               (cp >= 0xA790 and cp <= 0xA793) or
-               (cp >= 0xA7A0 and cp <= 0xA7AA) or
-               (cp >= 0xA7F8 and cp <= 0xA801) or
-               (cp >= 0xA803 and cp <= 0xA805) or
-               (cp >= 0xA807 and cp <= 0xA80A) or
-               (cp >= 0xA80C and cp <= 0xA822) or
-               (cp >= 0xA840 and cp <= 0xA873) or
-               (cp >= 0xA882 and cp <= 0xA8B3) or
-               (cp >= 0xA8F2 and cp <= 0xA8F7) or
-               (cp >= 0xA8FB and cp <= 0xA8FB) or
-               (cp >= 0xA90A and cp <= 0xA925) or
-               (cp >= 0xA930 and cp <= 0xA946) or
-               (cp >= 0xA960 and cp <= 0xA97C) or
-               (cp >= 0xA984 and cp <= 0xA9B2) or
-               (cp >= 0xA9CF and cp <= 0xA9CF) or
-               (cp >= 0xA9E0 and cp <= 0xA9E4) or
-               (cp >= 0xA9E6 and cp <= 0xA9EF) or
-               (cp >= 0xA9FA and cp <= 0xA9FE) or
-               (cp >= 0xAA00 and cp <= 0xAA28) or
-               (cp >= 0xAA40 and cp <= 0xAA42) or
-               (cp >= 0xAA44 and cp <= 0xAA4B) or
-               (cp >= 0xAA60 and cp <= 0xAA76) or
-               (cp >= 0xAA7A and cp <= 0xAA7A) or
-               (cp >= 0xAA80 and cp <= 0xAAAF) or
-               (cp >= 0xAAB1 and cp <= 0xAAB1) or
-               (cp >= 0xAAB5 and cp <= 0xAAB6) or
-               (cp >= 0xAAB9 and cp <= 0xAABD) or
-               (cp >= 0xAAC0 and cp <= 0xAAC0) or
-               (cp >= 0xAAC2 and cp <= 0xAAC2) or
-               (cp >= 0xAADB and cp <= 0xAADD) or
-               (cp >= 0xAAE0 and cp <= 0xAAEA) or
-               (cp >= 0xAAF2 and cp <= 0xAAF4) or
-               (cp >= 0xAB01 and cp <= 0xAB06) or
-               (cp >= 0xAB09 and cp <= 0xAB0E) or
-               (cp >= 0xAB11 and cp <= 0xAB16) or
-               (cp >= 0xAB20 and cp <= 0xAB26) or
-               (cp >= 0xAB28 and cp <= 0xAB2E) or
-               (cp >= 0xAB30 and cp <= 0xAB5A) or
-               (cp >= 0xAB5C and cp <= 0xAB5F) or
-               (cp >= 0xAB60 and cp <= 0xAB65) or
-               (cp >= 0xAB70 and cp <= 0xABBF) or
-               (cp >= 0xABC0 and cp <= 0xABE2) or
-               (cp >= 0xAC00 and cp <= 0xD7A3) or
-               (cp >= 0xD7B0 and cp <= 0xD7C6) or
-               (cp >= 0xD7CB and cp <= 0xD7FB) or
-               (cp >= 0xF900 and cp <= 0xFA6D) or
-               (cp >= 0xFA70 and cp <= 0xFAD9) or
-               (cp >= 0xFB00 and cp <= 0xFB06) or
-               (cp >= 0xFB13 and cp <= 0xFB17) or
-               (cp >= 0xFB1D and cp <= 0xFB1D) or
-               (cp >= 0xFB1F and cp <= 0xFB28) or
-               (cp >= 0xFB2A and cp <= 0xFB36) or
-               (cp >= 0xFB38 and cp <= 0xFB3C) or
-               (cp >= 0xFB3E and cp <= 0xFB3E) or
-               (cp >= 0xFB40 and cp <= 0xFB41) or
-               (cp >= 0xFB43 and cp <= 0xFB44) or
-               (cp >= 0xFB46 and cp <= 0xFBB1) or
-               (cp >= 0xFBD3 and cp <= 0xFD3D) or
-               (cp >= 0xFD50 and cp <= 0xFD8F) or
-               (cp >= 0xFD92 and cp <= 0xFDC7) or
-               (cp >= 0xFDF0 and cp <= 0xFDFB) or
-               (cp >= 0xFE70 and cp <= 0xFE74) or
-               (cp >= 0xFE76 and cp <= 0xFEFC) or
-               (cp >= 0xFF66 and cp <= 0xFF6F) or
-               (cp >= 0xFF71 and cp <= 0xFF9D) or
-               (cp >= 0xFFA0 and cp <= 0xFFBE) or
-               (cp >= 0xFFC2 and cp <= 0xFFC7) or
-               (cp >= 0xFFCA and cp <= 0xFFCF) or
-               (cp >= 0xFFD2 and cp <= 0xFFD7) or
-               (cp >= 0xFFDA and cp <= 0xFFDC);
-    } else if (property.len == 1 and property[0] == 'N') {
-        return isUnicodeProperty(cp, "Nd") or
-               isUnicodeProperty(cp, "Nl") or
-               isUnicodeProperty(cp, "No");
-    } else if (property.len == 2 and property[0] == 'N' and property[1] == 'd') {
-        // Decimal Number
-        return (cp >= 0x0030 and cp <= 0x0039) or
-               (cp >= 0x0660 and cp <= 0x0669) or
-               (cp >= 0x06F0 and cp <= 0x06F9) or
-               (cp >= 0x07C0 and cp <= 0x07C9) or
-               (cp >= 0x0966 and cp <= 0x096F) or
-               (cp >= 0x09E6 and cp <= 0x09EF) or
-               (cp >= 0x0A66 and cp <= 0x0A6F) or
-               (cp >= 0x0AE6 and cp <= 0x0AEF) or
-               (cp >= 0x0B66 and cp <= 0x0B6F) or
-               (cp >= 0x0BE6 and cp <= 0x0BEF) or
-               (cp >= 0x0C66 and cp <= 0x0C6F) or
-               (cp >= 0x0CE6 and cp <= 0x0CEF) or
-               (cp >= 0x0D66 and cp <= 0x0D6F) or
-               (cp >= 0x0E50 and cp <= 0x0E59) or
-               (cp >= 0x0ED0 and cp <= 0x0ED9) or
-               (cp >= 0x0F20 and cp <= 0x0F29) or
-               (cp >= 0x1040 and cp <= 0x1049) or
-               (cp >= 0x1090 and cp <= 0x1099) or
-               (cp >= 0x17E0 and cp <= 0x17E9) or
-               (cp >= 0x1810 and cp <= 0x1819) or
-               (cp >= 0x1946 and cp <= 0x194F) or
-               (cp >= 0x19D0 and cp <= 0x19D9) or
-               (cp >= 0x1A80 and cp <= 0x1A89) or
-               (cp >= 0x1A90 and cp <= 0x1A99) or
-               (cp >= 0x1B50 and cp <= 0x1B59) or
-               (cp >= 0x1BB0 and cp <= 0x1BB9) or
-               (cp >= 0x1C40 and cp <= 0x1C49) or
-               (cp >= 0x1C50 and cp <= 0x1C59) or
-               (cp >= 0xA620 and cp <= 0xA629) or
-               (cp >= 0xA8D0 and cp <= 0xA8D9) or
-               (cp >= 0xA900 and cp <= 0xA909) or
-               (cp >= 0xA9D0 and cp <= 0xA9D9) or
-               (cp >= 0xA9F0 and cp <= 0xA9F9) or
-               (cp >= 0xAA50 and cp <= 0xAA59) or
-               (cp >= 0xABF0 and cp <= 0xABF9) or
-               (cp >= 0xFF10 and cp <= 0xFF19);
-    } else if (property.len == 2 and property[0] == 'N' and property[1] == 'l') {
-        // Letter Number
-        return (cp >= 0x16EE and cp <= 0x16F0) or
-               (cp >= 0x2160 and cp <= 0x2182) or
-               (cp >= 0x2185 and cp <= 0x2188) or
-               (cp >= 0x3007 and cp <= 0x3007) or
-               (cp >= 0x3021 and cp <= 0x3029) or
-               (cp >= 0x3038 and cp <= 0x303A) or
-               (cp >= 0xA6E6 and cp <= 0xA6EF);
-    } else if (property.len == 2 and property[0] == 'N' and property[1] == 'o') {
-        // Other Number
-        return (cp >= 0x00B2 and cp <= 0x00B3) or
-               (cp >= 0x00B9 and cp <= 0x00B9) or
-               (cp >= 0x00BC and cp <= 0x00BE) or
-               (cp >= 0x09F4 and cp <= 0x09F9) or
-               (cp >= 0x0B72 and cp <= 0x0B77) or
-               (cp >= 0x0BF0 and cp <= 0x0BF2) or
-               (cp >= 0x0C78 and cp <= 0x0C7E) or
-               (cp >= 0x0D58 and cp <= 0x0D5E) or
-               (cp >= 0x0D70 and cp <= 0x0D78) or
-               (cp >= 0x0F2A and cp <= 0x0F33) or
-               (cp >= 0x1369 and cp <= 0x1371) or
-               (cp >= 0x17F0 and cp <= 0x17F9) or
-               (cp >= 0x19DA and cp <= 0x19DA) or
-               (cp >= 0x2070 and cp <= 0x2070) or
-               (cp >= 0x2074 and cp <= 0x2079) or
-               (cp >= 0x2080 and cp <= 0x2089) or
-               (cp >= 0x2150 and cp <= 0x215F) or
-               (cp >= 0x2189 and cp <= 0x2189) or
-               (cp >= 0x2460 and cp <= 0x249B) or
-               (cp >= 0x24EA and cp <= 0x24FF) or
-               (cp >= 0x2776 and cp <= 0x2793) or
-               (cp >= 0x2CFD and cp <= 0x2CFD) or
-               (cp >= 0x3192 and cp <= 0x3195) or
-               (cp >= 0x3220 and cp <= 0x3229) or
-               (cp >= 0x3248 and cp <= 0x324F) or
-               (cp >= 0x3251 and cp <= 0x325F) or
-               (cp >= 0x3280 and cp <= 0x3289) or
-               (cp >= 0x32B1 and cp <= 0x32BF) or
-               (cp >= 0xA830 and cp <= 0xA835);
-    } else if (property.len == 1 and property[0] == 'P') {
-        return isUnicodeProperty(cp, "Pc") or
-               isUnicodeProperty(cp, "Pd") or
-               isUnicodeProperty(cp, "Ps") or
-               isUnicodeProperty(cp, "Pe") or
-               isUnicodeProperty(cp, "Pi") or
-               isUnicodeProperty(cp, "Pf") or
-               isUnicodeProperty(cp, "Po");
-    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'c') {
-        // Connector Punctuation
-        return (cp >= 0x005F and cp <= 0x005F) or
-               (cp >= 0x203F and cp <= 0x2040) or
-               (cp >= 0x2054 and cp <= 0x2054) or
-               (cp >= 0xFE33 and cp <= 0xFE34) or
-               (cp >= 0xFE4D and cp <= 0xFE4F) or
-               (cp >= 0xFF3F and cp <= 0xFF3F);
-    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'd') {
-        // Dash Punctuation
-        return (cp >= 0x002D and cp <= 0x002D) or
-               (cp >= 0x058A and cp <= 0x058A) or
-               (cp >= 0x05BE and cp <= 0x05BE) or
-               (cp >= 0x1400 and cp <= 0x1400) or
-               (cp >= 0x1806 and cp <= 0x1806) or
-               (cp >= 0x2010 and cp <= 0x2015) or
-               (cp >= 0x2E17 and cp <= 0x2E17) or
-               (cp >= 0x2E1A and cp <= 0x2E1A) or
-               (cp >= 0x2E3A and cp <= 0x2E3B) or
-               (cp >= 0x2E40 and cp <= 0x2E40) or
-               (cp >= 0x301C and cp <= 0x301C) or
-               (cp >= 0x3030 and cp <= 0x3030) or
-               (cp >= 0x30A0 and cp <= 0x30A0) or
-               (cp >= 0xFE31 and cp <= 0xFE32) or
-               (cp >= 0xFE58 and cp <= 0xFE58) or
-               (cp >= 0xFE63 and cp <= 0xFE63) or
-               (cp >= 0xFF0D and cp <= 0xFF0D);
-    } else if (property.len == 2 and property[0] == 'P' and property[1] == 's') {
-        // Open Punctuation
-        return (cp >= 0x0028 and cp <= 0x0028) or
-               (cp >= 0x005B and cp <= 0x005B) or
-               (cp >= 0x007B and cp <= 0x007B) or
-               (cp >= 0x0F3A and cp <= 0x0F3A) or
-               (cp >= 0x0F3C and cp <= 0x0F3C) or
-               (cp >= 0x169B and cp <= 0x169B) or
-               (cp >= 0x201A and cp <= 0x201A) or
-               (cp >= 0x201E and cp <= 0x201E) or
-               (cp >= 0x2045 and cp <= 0x2045) or
-               (cp >= 0x207D and cp <= 0x207D) or
-               (cp >= 0x208D and cp <= 0x208D) or
-               (cp >= 0x2308 and cp <= 0x2308) or
-               (cp >= 0x230A and cp <= 0x230A) or
-               (cp >= 0x2329 and cp <= 0x2329) or
-               (cp >= 0x2768 and cp <= 0x2768) or
-               (cp >= 0x276A and cp <= 0x276A) or
-               (cp >= 0x276C and cp <= 0x276C) or
-               (cp >= 0x276E and cp <= 0x276E) or
-               (cp >= 0x2770 and cp <= 0x2770) or
-               (cp >= 0x2772 and cp <= 0x2772) or
-               (cp >= 0x2774 and cp <= 0x2774) or
-               (cp >= 0x27C5 and cp <= 0x27C5) or
-               (cp >= 0x27E6 and cp <= 0x27E6) or
-               (cp >= 0x27E8 and cp <= 0x27E8) or
-               (cp >= 0x27EA and cp <= 0x27EA) or
-               (cp >= 0x27EC and cp <= 0x27EC) or
-               (cp >= 0x27EE and cp <= 0x27EE) or
-               (cp >= 0x2983 and cp <= 0x2983) or
-               (cp >= 0x2985 and cp <= 0x2985) or
-               (cp >= 0x2987 and cp <= 0x2987) or
-               (cp >= 0x2989 and cp <= 0x2989) or
-               (cp >= 0x298B and cp <= 0x298B) or
-               (cp >= 0x298D and cp <= 0x298D) or
-               (cp >= 0x298F and cp <= 0x298F) or
-               (cp >= 0x2991 and cp <= 0x2991) or
-               (cp >= 0x2993 and cp <= 0x2993) or
-               (cp >= 0x2995 and cp <= 0x2995) or
-               (cp >= 0x2997 and cp <= 0x2997) or
-               (cp >= 0x29D8 and cp <= 0x29D8) or
-               (cp >= 0x29DA and cp <= 0x29DA) or
-               (cp >= 0x29FC and cp <= 0x29FC) or
-               (cp >= 0x2E22 and cp <= 0x2E22) or
-               (cp >= 0x2E24 and cp <= 0x2E24) or
-               (cp >= 0x2E26 and cp <= 0x2E26) or
-               (cp >= 0x2E28 and cp <= 0x2E28) or
-               (cp >= 0x3008 and cp <= 0x3008) or
-               (cp >= 0x300A and cp <= 0x300A) or
-               (cp >= 0x300C and cp <= 0x300C) or
-               (cp >= 0x300E and cp <= 0x300E) or
-               (cp >= 0x3010 and cp <= 0x3010) or
-               (cp >= 0x3014 and cp <= 0x3014) or
-               (cp >= 0x3016 and cp <= 0x3016) or
-               (cp >= 0x3018 and cp <= 0x3018) or
-               (cp >= 0x301A and cp <= 0x301A) or
-               (cp >= 0x301D and cp <= 0x301D) or
-               (cp >= 0xFD3F and cp <= 0xFD3F) or
-               (cp >= 0xFE17 and cp <= 0xFE17) or
-               (cp >= 0xFE35 and cp <= 0xFE35) or
-               (cp >= 0xFE37 and cp <= 0xFE37) or
-               (cp >= 0xFE39 and cp <= 0xFE39) or
-               (cp >= 0xFE3B and cp <= 0xFE3B) or
-               (cp >= 0xFE3D and cp <= 0xFE3D) or
-               (cp >= 0xFE3F and cp <= 0xFE3F) or
-               (cp >= 0xFE41 and cp <= 0xFE41) or
-               (cp >= 0xFE43 and cp <= 0xFE43) or
-               (cp >= 0xFE47 and cp <= 0xFE47) or
-               (cp >= 0xFE59 and cp <= 0xFE59) or
-               (cp >= 0xFE5B and cp <= 0xFE5B) or
-               (cp >= 0xFE5D and cp <= 0xFE5D) or
-               (cp >= 0xFF08 and cp <= 0xFF08) or
-               (cp >= 0xFF3B and cp <= 0xFF3B) or
-               (cp >= 0xFF5B and cp <= 0xFF5B) or
-               (cp >= 0xFF5F and cp <= 0xFF5F) or
-               (cp >= 0xFF62 and cp <= 0xFF62);
-    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'e') {
-        // Close Punctuation
-        return (cp >= 0x0029 and cp <= 0x0029) or
-               (cp >= 0x005D and cp <= 0x005D) or
-               (cp >= 0x007D and cp <= 0x007D) or
-               (cp >= 0x0F3B and cp <= 0x0F3B) or
-               (cp >= 0x0F3D and cp <= 0x0F3D) or
-               (cp >= 0x169C and cp <= 0x169C) or
-               (cp >= 0x2046 and cp <= 0x2046) or
-               (cp >= 0x207E and cp <= 0x207E) or
-               (cp >= 0x208E and cp <= 0x208E) or
-               (cp >= 0x2309 and cp <= 0x2309) or
-               (cp >= 0x230B and cp <= 0x230B) or
-               (cp >= 0x232A and cp <= 0x232A) or
-               (cp >= 0x2769 and cp <= 0x2769) or
-               (cp >= 0x276B and cp <= 0x276B) or
-               (cp >= 0x276D and cp <= 0x276D) or
-               (cp >= 0x276F and cp <= 0x276F) or
-               (cp >= 0x2771 and cp <= 0x2771) or
-               (cp >= 0x2773 and cp <= 0x2773) or
-               (cp >= 0x2775 and cp <= 0x2775) or
-               (cp >= 0x27C6 and cp <= 0x27C6) or
-               (cp >= 0x27E7 and cp <= 0x27E7) or
-               (cp >= 0x27E9 and cp <= 0x27E9) or
-               (cp >= 0x27EB and cp <= 0x27EB) or
-               (cp >= 0x27ED and cp <= 0x27ED) or
-               (cp >= 0x27EF and cp <= 0x27EF) or
-               (cp >= 0x2984 and cp <= 0x2984) or
-               (cp >= 0x2986 and cp <= 0x2986) or
-               (cp >= 0x2988 and cp <= 0x2988) or
-               (cp >= 0x298A and cp <= 0x298A) or
-               (cp >= 0x298C and cp <= 0x298C) or
-               (cp >= 0x298E and cp <= 0x298E) or
-               (cp >= 0x2990 and cp <= 0x2990) or
-               (cp >= 0x2992 and cp <= 0x2992) or
-               (cp >= 0x2994 and cp <= 0x2994) or
-               (cp >= 0x2996 and cp <= 0x2996) or
-               (cp >= 0x2998 and cp <= 0x2998) or
-               (cp >= 0x29D9 and cp <= 0x29D9) or
-               (cp >= 0x29DB and cp <= 0x29DB) or
-               (cp >= 0x29FD and cp <= 0x29FD) or
-               (cp >= 0x2E23 and cp <= 0x2E23) or
-               (cp >= 0x2E25 and cp <= 0x2E25) or
-               (cp >= 0x2E27 and cp <= 0x2E27) or
-               (cp >= 0x2E29 and cp <= 0x2E29) or
-               (cp >= 0x3009 and cp <= 0x3009) or
-               (cp >= 0x300B and cp <= 0x300B) or
-               (cp >= 0x300D and cp <= 0x300D) or
-               (cp >= 0x300F and cp <= 0x300F) or
-               (cp >= 0x3011 and cp <= 0x3011) or
-               (cp >= 0x3015 and cp <= 0x3015) or
-               (cp >= 0x3017 and cp <= 0x3017) or
-               (cp >= 0x3019 and cp <= 0x3019) or
-               (cp >= 0x301B and cp <= 0x301B) or
-               (cp >= 0x301E and cp <= 0x301F) or
-               (cp >= 0xFD3E and cp <= 0xFD3E) or
-               (cp >= 0xFE18 and cp <= 0xFE18) or
-               (cp >= 0xFE36 and cp <= 0xFE36) or
-               (cp >= 0xFE38 and cp <= 0xFE38) or
-               (cp >= 0xFE3A and cp <= 0xFE3A) or
-               (cp >= 0xFE3C and cp <= 0xFE3C) or
-               (cp >= 0xFE3E and cp <= 0xFE3E) or
-               (cp >= 0xFE40 and cp <= 0xFE40) or
-               (cp >= 0xFE42 and cp <= 0xFE42) or
-               (cp >= 0xFE44 and cp <= 0xFE44) or
-               (cp >= 0xFE48 and cp <= 0xFE48) or
-               (cp >= 0xFE5A and cp <= 0xFE5A) or
-               (cp >= 0xFE5C and cp <= 0xFE5C) or
-               (cp >= 0xFE5E and cp <= 0xFE5E) or
-               (cp >= 0xFF09 and cp <= 0xFF09) or
-               (cp >= 0xFF3D and cp <= 0xFF3D) or
-               (cp >= 0xFF5D and cp <= 0xFF5D) or
-               (cp >= 0xFF60 and cp <= 0xFF60) or
-               (cp >= 0xFF63 and cp <= 0xFF63);
-    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'i') {
-        // Initial Punctuation
-        return (cp >= 0x00AB and cp <= 0x00AB) or
-               (cp >= 0x2018 and cp <= 0x2018) or
-               (cp >= 0x201B and cp <= 0x201C) or
-               (cp >= 0x201F and cp <= 0x201F) or
-               (cp >= 0x2039 and cp <= 0x2039);
-    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'f') {
-        // Final Punctuation
-        return (cp >= 0x00BB and cp <= 0x00BB) or
-               (cp >= 0x2019 and cp <= 0x2019) or
-               (cp >= 0x201D and cp <= 0x201D) or
-               (cp >= 0x203A and cp <= 0x203A);
-    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'o') {
-        // Other Punctuation
-        return (cp >= 0x0021 and cp <= 0x0023) or
-               (cp >= 0x0025 and cp <= 0x002A) or
-               (cp >= 0x002C and cp <= 0x002C) or
-               (cp >= 0x002E and cp <= 0x002F) or
-               (cp >= 0x003A and cp <= 0x003B) or
-               (cp >= 0x003F and cp <= 0x0040) or
-               (cp >= 0x005C and cp <= 0x005C) or
-               (cp >= 0x00A1 and cp <= 0x00A1) or
-               (cp >= 0x00A7 and cp <= 0x00A7) or
-               (cp >= 0x00B6 and cp <= 0x00B7) or
-               (cp >= 0x00BF and cp <= 0x00BF) or
-               (cp >= 0x037E and cp <= 0x037E) or
-               (cp >= 0x0387 and cp <= 0x0387) or
-               (cp >= 0x055A and cp <= 0x055F) or
-               (cp >= 0x0589 and cp <= 0x0589) or
-               (cp >= 0x05C0 and cp <= 0x05C0) or
-               (cp >= 0x05C3 and cp <= 0x05C3) or
-               (cp >= 0x05C6 and cp <= 0x05C6) or
-               (cp >= 0x05F3 and cp <= 0x05F4) or
-               (cp >= 0x0609 and cp <= 0x060A) or
-               (cp >= 0x060C and cp <= 0x060D) or
-               (cp >= 0x061B and cp <= 0x061B) or
-               (cp >= 0x061E and cp <= 0x061F) or
-               (cp >= 0x066A and cp <= 0x066D) or
-               (cp >= 0x06D4 and cp <= 0x06D4) or
-               (cp >= 0x0700 and cp <= 0x070D) or
-               (cp >= 0x07F7 and cp <= 0x07F9) or
-               (cp >= 0x0830 and cp <= 0x083E) or
-               (cp >= 0x085E and cp <= 0x085E) or
-               (cp >= 0x0964 and cp <= 0x0965) or
-               (cp >= 0x0970 and cp <= 0x0970) or
-               (cp >= 0x09FD and cp <= 0x09FD) or
-               (cp >= 0x0A76 and cp <= 0x0A76) or
-               (cp >= 0x0AF0 and cp <= 0x0AF0) or
-               (cp >= 0x0C77 and cp <= 0x0C77) or
-               (cp >= 0x0C84 and cp <= 0x0C84) or
-               (cp >= 0x0DF4 and cp <= 0x0DF4) or
-               (cp >= 0x0E4F and cp <= 0x0E4F) or
-               (cp >= 0x0E5A and cp <= 0x0E5B) or
-               (cp >= 0x0F04 and cp <= 0x0F12) or
-               (cp >= 0x0F14 and cp <= 0x0F14) or
-               (cp >= 0x0F3A and cp <= 0x0F3D) or
-               (cp >= 0x0F85 and cp <= 0x0F85) or
-               (cp >= 0x0FD0 and cp <= 0x0FD4) or
-               (cp >= 0x0FD9 and cp <= 0x0FDA) or
-               (cp >= 0x104A and cp <= 0x104F) or
-               (cp >= 0x10FB and cp <= 0x10FB) or
-               (cp >= 0x1360 and cp <= 0x1368) or
-               (cp >= 0x166E and cp <= 0x166E) or
-               (cp >= 0x169B and cp <= 0x169C) or
-               (cp >= 0x16EB and cp <= 0x16ED) or
-               (cp >= 0x1735 and cp <= 0x1736) or
-               (cp >= 0x17D4 and cp <= 0x17D6) or
-               (cp >= 0x17D8 and cp <= 0x17DA) or
-               (cp >= 0x1800 and cp <= 0x1805) or
-               (cp >= 0x1807 and cp <= 0x180A) or
-               (cp >= 0x1944 and cp <= 0x1945) or
-               (cp >= 0x1A1E and cp <= 0x1A1F) or
-               (cp >= 0x1AA0 and cp <= 0x1AA6) or
-               (cp >= 0x1AA8 and cp <= 0x1AAD) or
-               (cp >= 0x1B5A and cp <= 0x1B60) or
-               (cp >= 0x1BFC and cp <= 0x1BFF) or
-               (cp >= 0x1C3B and cp <= 0x1C3F) or
-               (cp >= 0x1C7E and cp <= 0x1C7F) or
-               (cp >= 0x1CC0 and cp <= 0x1CC7) or
-               (cp >= 0x1CD3 and cp <= 0x1CD3) or
-               (cp >= 0x2010 and cp <= 0x2027) or
-               (cp >= 0x2030 and cp <= 0x2043) or
-               (cp >= 0x2045 and cp <= 0x2051) or
-               (cp >= 0x2053 and cp <= 0x205E) or
-               (cp >= 0x207D and cp <= 0x207E) or
-               (cp >= 0x208D and cp <= 0x208E) or
-               (cp >= 0x2308 and cp <= 0x230B) or
-               (cp >= 0x2329 and cp <= 0x232A) or
-               (cp >= 0x2768 and cp <= 0x2775) or
-               (cp >= 0x27C5 and cp <= 0x27C6) or
-               (cp >= 0x27E6 and cp <= 0x27EF) or
-               (cp >= 0x2983 and cp <= 0x2998) or
-               (cp >= 0x29D8 and cp <= 0x29DB) or
-               (cp >= 0x29FC and cp <= 0x29FD) or
-               (cp >= 0x2CF9 and cp <= 0x2CFC) or
-               (cp >= 0x2CFE and cp <= 0x2CFF) or
-               (cp >= 0x2D70 and cp <= 0x2D70) or
-               (cp >= 0x2E00 and cp <= 0x2E2E) or
-               (cp >= 0x2E30 and cp <= 0x2E4F) or
-               (cp >= 0x2E52 and cp <= 0x2E5D) or
-               (cp >= 0x3001 and cp <= 0x3003) or
-               (cp >= 0x303D and cp <= 0x303D) or
-               (cp >= 0x30FB and cp <= 0x30FB) or
-               (cp >= 0xA4FE and cp <= 0xA4FF) or
-               (cp >= 0xA60D and cp <= 0xA60F) or
-               (cp >= 0xA673 and cp <= 0xA673) or
-               (cp >= 0xA67E and cp <= 0xA67E) or
-               (cp >= 0xA6F2 and cp <= 0xA6F7) or
-               (cp >= 0xA874 and cp <= 0xA877) or
-               (cp >= 0xA8CE and cp <= 0xA8CF) or
-               (cp >= 0xA8F8 and cp <= 0xA8FA) or
-               (cp >= 0xA8FC and cp <= 0xA8FC) or
-               (cp >= 0xA92E and cp <= 0xA92F) or
-               (cp >= 0xA95F and cp <= 0xA95F) or
-               (cp >= 0xA9C1 and cp <= 0xA9CD) or
-               (cp >= 0xA9DE and cp <= 0xA9DF) or
-               (cp >= 0xAA5C and cp <= 0xAA5F) or
-               (cp >= 0xAADE and cp <= 0xAADF) or
-               (cp >= 0xAAF0 and cp <= 0xAAF1) or
-               (cp >= 0xABEB and cp <= 0xABEB) or
-               (cp >= 0xFE10 and cp <= 0xFE19) or
-               (cp >= 0xFE30 and cp <= 0xFE52) or
-               (cp >= 0xFE54 and cp <= 0xFE61) or
-               (cp >= 0xFE63 and cp <= 0xFE63) or
-               (cp >= 0xFE68 and cp <= 0xFE68) or
-               (cp >= 0xFE6A and cp <= 0xFE6B) or
-               (cp >= 0xFF01 and cp <= 0xFF03) or
-               (cp >= 0xFF05 and cp <= 0xFF0A) or
-               (cp >= 0xFF0C and cp <= 0xFF0C) or
-               (cp >= 0xFF0E and cp <= 0xFF0F) or
-               (cp >= 0xFF1A and cp <= 0xFF1B) or
-               (cp >= 0xFF1F and cp <= 0xFF20) or
-               (cp >= 0xFF3C and cp <= 0xFF3C) or
-               (cp >= 0xFF61 and cp <= 0xFF61) or
-               (cp >= 0xFF64 and cp <= 0xFF65);
-    } else if (property.len == 1 and property[0] == 'S') {
-        return isUnicodeProperty(cp, "Sc") or
-               isUnicodeProperty(cp, "Sk") or
-               isUnicodeProperty(cp, "Sm") or
-               isUnicodeProperty(cp, "So");
-    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'c') {
-        // Currency Symbol
-        return (cp >= 0x0024 and cp <= 0x0024) or
-               (cp >= 0x00A2 and cp <= 0x00A5) or
-               (cp >= 0x058F and cp <= 0x058F) or
-               (cp >= 0x060B and cp <= 0x060B) or
-               (cp >= 0x09F2 and cp <= 0x09F3) or
-               (cp >= 0x09FB and cp <= 0x09FB) or
-               (cp >= 0x0AF1 and cp <= 0x0AF1) or
-               (cp >= 0x0BF9 and cp <= 0x0BF9) or
-               (cp >= 0x0E3F and cp <= 0x0E3F) or
-               (cp >= 0x17DB and cp <= 0x17DB) or
-               (cp >= 0x20A0 and cp <= 0x20C0) or
-               (cp >= 0xA838 and cp <= 0xA838) or
-               (cp >= 0xFDFC and cp <= 0xFDFC) or
-               (cp >= 0xFE69 and cp <= 0xFE69) or
-               (cp >= 0xFF04 and cp <= 0xFF04) or
-               (cp >= 0xFFE0 and cp <= 0xFFE1) or
-               (cp >= 0xFFE5 and cp <= 0xFFE6);
-    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'k') {
-        // Modifier Symbol
-        return (cp >= 0x005E and cp <= 0x005E) or
-               (cp >= 0x0060 and cp <= 0x0060) or
-               (cp >= 0x00A8 and cp <= 0x00A8) or
-               (cp >= 0x00AF and cp <= 0x00AF) or
-               (cp >= 0x00B4 and cp <= 0x00B4) or
-               (cp >= 0x00B8 and cp <= 0x00B8) or
-               (cp >= 0x02C2 and cp <= 0x02C5) or
-               (cp >= 0x02D2 and cp <= 0x02DF) or
-               (cp >= 0x02E5 and cp <= 0x02EB) or
-               (cp >= 0x02ED and cp <= 0x02ED) or
-               (cp >= 0x02EF and cp <= 0x02FF) or
-               (cp >= 0x0375 and cp <= 0x0375) or
-               (cp >= 0x0384 and cp <= 0x0385) or
-               (cp >= 0x1FBD and cp <= 0x1FBD) or
-               (cp >= 0x1FBF and cp <= 0x1FC1) or
-               (cp >= 0x1FCD and cp <= 0x1FCF) or
-               (cp >= 0x1FDD and cp <= 0x1FDF) or
-               (cp >= 0x1FED and cp <= 0x1FEF) or
-               (cp >= 0x1FFD and cp <= 0x1FFE) or
-               (cp >= 0x309B and cp <= 0x309C) or
-               (cp >= 0xA700 and cp <= 0xA716) or
-               (cp >= 0xA720 and cp <= 0xA721) or
-               (cp >= 0xA789 and cp <= 0xA78A) or
-               (cp >= 0xAB5B and cp <= 0xAB5B) or
-               (cp >= 0xFBB2 and cp <= 0xFBC1) or
-               (cp >= 0xFF3E and cp <= 0xFF3E) or
-               (cp >= 0xFF40 and cp <= 0xFF40) or
-               (cp >= 0xFFE3 and cp <= 0xFFE3);
-    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'm') {
-        // Math Symbol
-        return (cp >= 0x002B and cp <= 0x002B) or
-               (cp >= 0x003C and cp <= 0x003E) or
-               (cp >= 0x007C and cp <= 0x007C) or
-               (cp >= 0x007E and cp <= 0x007E) or
-               (cp >= 0x00AC and cp <= 0x00AC) or
-               (cp >= 0x00B1 and cp <= 0x00B1) or
-               (cp >= 0x00D7 and cp <= 0x00D7) or
-               (cp >= 0x00F7 and cp <= 0x00F7) or
-               (cp >= 0x03F6 and cp <= 0x03F6) or
-               (cp >= 0x0606 and cp <= 0x0608) or
-               (cp >= 0x2044 and cp <= 0x2044) or
-               (cp >= 0x2052 and cp <= 0x2052) or
-               (cp >= 0x207A and cp <= 0x207C) or
-               (cp >= 0x208A and cp <= 0x208C) or
-               (cp >= 0x2118 and cp <= 0x2118) or
-               (cp >= 0x2140 and cp <= 0x2144) or
-               (cp >= 0x214B and cp <= 0x214B) or
-               (cp >= 0x2190 and cp <= 0x2194) or
-               (cp >= 0x219A and cp <= 0x219B) or
-               (cp >= 0x21A0 and cp <= 0x21A0) or
-               (cp >= 0x21A3 and cp <= 0x21A3) or
-               (cp >= 0x21A6 and cp <= 0x21A6) or
-               (cp >= 0x21AE and cp <= 0x21AE) or
-               (cp >= 0x21CE and cp <= 0x21CF) or
-               (cp >= 0x21D2 and cp <= 0x21D2) or
-               (cp >= 0x21D4 and cp <= 0x21D4) or
-               (cp >= 0x21F4 and cp <= 0x22FF) or
-               (cp >= 0x2320 and cp <= 0x2321) or
-               (cp >= 0x237C and cp <= 0x237C) or
-               (cp >= 0x239B and cp <= 0x23B3) or
-               (cp >= 0x23DC and cp <= 0x23E1) or
-               (cp >= 0x25B7 and cp <= 0x25B7) or
-               (cp >= 0x25C1 and cp <= 0x25C1) or
-               (cp >= 0x25F8 and cp <= 0x25FF) or
-               (cp >= 0x266F and cp <= 0x266F) or
-               (cp >= 0x27C0 and cp <= 0x27C4) or
-               (cp >= 0x27C7 and cp <= 0x27E5) or
-               (cp >= 0x27F0 and cp <= 0x27FF) or
-               (cp >= 0x2900 and cp <= 0x2982) or
-               (cp >= 0x2999 and cp <= 0x29D7) or
-               (cp >= 0x29DC and cp <= 0x29FB) or
-               (cp >= 0x29FE and cp <= 0x2AFF) or
-               (cp >= 0x2B30 and cp <= 0x2B44) or
-               (cp >= 0x2B47 and cp <= 0x2B4C) or
-               (cp >= 0xFB29 and cp <= 0xFB29) or
-               (cp >= 0xFDFC and cp <= 0xFDFC) or
-               (cp >= 0xFE62 and cp <= 0xFE62) or
-               (cp >= 0xFE64 and cp <= 0xFE66) or
-               (cp >= 0xFF0B and cp <= 0xFF0B) or
-               (cp >= 0xFF1C and cp <= 0xFF1E) or
-               (cp >= 0xFF5C and cp <= 0xFF5C) or
-               (cp >= 0xFF5E and cp <= 0xFF5E) or
-               (cp >= 0xFFE2 and cp <= 0xFFE2) or
-               (cp >= 0xFFE9 and cp <= 0xFFEC);
-    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'o') {
-        // Other Symbol
-        return (cp >= 0x00A6 and cp <= 0x00A7) or
-               (cp >= 0x00A9 and cp <= 0x00A9) or
-               (cp >= 0x00AE and cp <= 0x00AE) or
-               (cp >= 0x00B0 and cp <= 0x00B0) or
-               (cp >= 0x0482 and cp <= 0x0482) or
-               (cp >= 0x060E and cp <= 0x060F) or
-               (cp >= 0x06DE and cp <= 0x06DE) or
-               (cp >= 0x06E9 and cp <= 0x06E9) or
-               (cp >= 0x06FD and cp <= 0x06FE) or
-               (cp >= 0x07F6 and cp <= 0x07F6) or
-               (cp >= 0x09FA and cp <= 0x09FA) or
-               (cp >= 0x0B70 and cp <= 0x0B70) or
-               (cp >= 0x0BF3 and cp <= 0x0BF8) or
-               (cp >= 0x0BFA and cp <= 0x0BFA) or
-               (cp >= 0x0C7F and cp <= 0x0C7F) or
-               (cp >= 0x0D4F and cp <= 0x0D4F) or
-               (cp >= 0x0D79 and cp <= 0x0D79) or
-               (cp >= 0x0F01 and cp <= 0x0F03) or
-               (cp >= 0x0F13 and cp <= 0x0F17) or
-               (cp >= 0x0F1A and cp <= 0x0F1F) or
-               (cp >= 0x0F34 and cp <= 0x0F34) or
-               (cp >= 0x0F36 and cp <= 0x0F36) or
-               (cp >= 0x0F38 and cp <= 0x0F38) or
-               (cp >= 0x0FBE and cp <= 0x0FC5) or
-               (cp >= 0x0FC7 and cp <= 0x0FCC) or
-               (cp >= 0x0FCE and cp <= 0x0FD4) or
-               (cp >= 0x0FD9 and cp <= 0x0FDA) or
-               (cp >= 0x109E and cp <= 0x109F) or
-               (cp >= 0x1360 and cp <= 0x1360) or
-               (cp >= 0x1390 and cp <= 0x1399) or
-               (cp >= 0x1940 and cp <= 0x1940) or
-               (cp >= 0x19DE and cp <= 0x19FF) or
-               (cp >= 0x1B61 and cp <= 0x1B6A) or
-               (cp >= 0x1B74 and cp <= 0x1B7C) or
-               (cp >= 0x2100 and cp <= 0x2101) or
-               (cp >= 0x2103 and cp <= 0x2106) or
-               (cp >= 0x2108 and cp <= 0x2109) or
-               (cp >= 0x2114 and cp <= 0x2114) or
-               (cp >= 0x2116 and cp <= 0x2117) or
-               (cp >= 0x211E and cp <= 0x2123) or
-               (cp >= 0x2125 and cp <= 0x2125) or
-               (cp >= 0x2127 and cp <= 0x2127) or
-               (cp >= 0x2129 and cp <= 0x2129) or
-               (cp >= 0x212E and cp <= 0x212E) or
-               (cp >= 0x213A and cp <= 0x213B) or
-               (cp >= 0x214A and cp <= 0x214A) or
-               (cp >= 0x214C and cp <= 0x214D) or
-               (cp >= 0x214F and cp <= 0x214F) or
-               (cp >= 0x2195 and cp <= 0x2199) or
-               (cp >= 0x219C and cp <= 0x219F) or
-               (cp >= 0x21A1 and cp <= 0x21A2) or
-               (cp >= 0x21A4 and cp <= 0x21A5) or
-               (cp >= 0x21A7 and cp <= 0x21AD) or
-               (cp >= 0x21AF and cp <= 0x21CD) or
-               (cp >= 0x21D0 and cp <= 0x21D1) or
-               (cp >= 0x21D3 and cp <= 0x21D3) or
-               (cp >= 0x21D5 and cp <= 0x21F3) or
-               (cp >= 0x2300 and cp <= 0x231F) or
-               (cp >= 0x2322 and cp <= 0x2328) or
-               (cp >= 0x232B and cp <= 0x237B) or
-               (cp >= 0x237D and cp <= 0x239A) or
-               (cp >= 0x23B4 and cp <= 0x23DB) or
-               (cp >= 0x23E2 and cp <= 0x2426) or
-               (cp >= 0x2440 and cp <= 0x244A) or
-               (cp >= 0x249C and cp <= 0x24E9) or
-               (cp >= 0x2500 and cp <= 0x25B6) or
-               (cp >= 0x25B8 and cp <= 0x25C0) or
-               (cp >= 0x25C2 and cp <= 0x25F7) or
-               (cp >= 0x2600 and cp <= 0x266E) or
-               (cp >= 0x2670 and cp <= 0x2775) or
-               (cp >= 0x2794 and cp <= 0x27BF) or
-               (cp >= 0x2800 and cp <= 0x28FF) or
-               (cp >= 0x2B00 and cp <= 0x2B2F) or
-               (cp >= 0x2B45 and cp <= 0x2B46) or
-               (cp >= 0x2B50 and cp <= 0x2B59) or
-               (cp >= 0x2CE5 and cp <= 0x2CEA) or
-               (cp >= 0x2E80 and cp <= 0x2E99) or
-               (cp >= 0x2E9B and cp <= 0x2EF3) or
-               (cp >= 0x2F00 and cp <= 0x2FD5) or
-               (cp >= 0x2FF0 and cp <= 0x2FFB) or
-               (cp >= 0x3004 and cp <= 0x3004) or
-               (cp >= 0x3012 and cp <= 0x3013) or
-               (cp >= 0x3020 and cp <= 0x3020) or
-               (cp >= 0x3036 and cp <= 0x3037) or
-               (cp >= 0x303E and cp <= 0x303F) or
-               (cp >= 0x3190 and cp <= 0x3191) or
-               (cp >= 0x3196 and cp <= 0x319F) or
-               (cp >= 0x31C0 and cp <= 0x31E3) or
-               (cp >= 0x3200 and cp <= 0x321E) or
-               (cp >= 0x322A and cp <= 0x3247) or
-               (cp >= 0x3250 and cp <= 0x3250) or
-               (cp >= 0x3260 and cp <= 0x327F) or
-               (cp >= 0x328A and cp <= 0x32B0) or
-               (cp >= 0x32C0 and cp <= 0x32FE) or
-               (cp >= 0x3300 and cp <= 0x33FF) or
-               (cp >= 0x4DC0 and cp <= 0x4DFF) or
-               (cp >= 0xA490 and cp <= 0xA4C6) or
-               (cp >= 0xA828 and cp <= 0xA82B) or
-               (cp >= 0xA836 and cp <= 0xA837) or
-               (cp >= 0xAA77 and cp <= 0xAA79) or
-               (cp >= 0xFDFD and cp <= 0xFDFD) or
-               (cp >= 0xFFFC and cp <= 0xFFFD);
-    } else if (property.len == 1 and property[0] == 'Z') {
-        return isUnicodeProperty(cp, "Zs") or
-               isUnicodeProperty(cp, "Zl") or
-               isUnicodeProperty(cp, "Zp");
-    } else if (property.len == 2 and property[0] == 'Z' and property[1] == 's') {
-        // Space Separator
-        return (cp >= 0x0020 and cp <= 0x0020) or
-               (cp >= 0x00A0 and cp <= 0x00A0) or
-               (cp >= 0x1680 and cp <= 0x1680) or
-               (cp >= 0x2000 and cp <= 0x200A) or
-               (cp >= 0x202F and cp <= 0x202F) or
-               (cp >= 0x205F and cp <= 0x205F) or
-               (cp >= 0x3000 and cp <= 0x3000);
-    } else if (property.len == 2 and property[0] == 'Z' and property[1] == 'l') {
-        // Line Separator
-        return (cp >= 0x2028 and cp <= 0x2028);
-    } else if (property.len == 2 and property[0] == 'Z' and property[1] == 'p') {
-        // Paragraph Separator
-        return (cp >= 0x2029 and cp <= 0x2029);
-    } else if (property.len == 1 and property[0] == 'C') {
-        // Other
-        return isUnicodeProperty(cp, "Cc") or
-               isUnicodeProperty(cp, "Cf") or
-               isUnicodeProperty(cp, "Co") or
-               isUnicodeProperty(cp, "Cs");
-    } else if (property.len == 2 and property[0] == 'C' and property[1] == 'c') {
-        // Control
-        return (cp >= 0x0000 and cp <= 0x001F) or
-               (cp >= 0x007F and cp <= 0x009F);
-    } else if (property.len == 2 and property[0] == 'C' and property[1] == 'f') {
-        // Format
-        return (cp >= 0x00AD and cp <= 0x00AD) or
-               (cp >= 0x0600 and cp <= 0x0605) or
-               (cp >= 0x061C and cp <= 0x061C) or
-               (cp >= 0x06DD and cp <= 0x06DD) or
-               (cp >= 0x070F and cp <= 0x070F) or
-               (cp >= 0x08E2 and cp <= 0x08E2) or
-               (cp >= 0x180E and cp <= 0x180E) or
-               (cp >= 0x200B and cp <= 0x200F) or
-               (cp >= 0x202A and cp <= 0x202E) or
-               (cp >= 0x2060 and cp <= 0x2064) or
-               (cp >= 0x2066 and cp <= 0x206F) or
-               (cp >= 0xFEFF and cp <= 0xFEFF) or
-               (cp >= 0xFFF9 and cp <= 0xFFFB) or
-               (cp >= 0x110BD and cp <= 0x110BD) or
-               (cp >= 0x1BCA0 and cp <= 0x1BCA3) or
-               (cp >= 0x1D173 and cp <= 0x1D17A) or
-               (cp >= 0xE0001 and cp <= 0xE0001) or
-               (cp >= 0xE0020 and cp <= 0xE007F);
-    } else if (property.len == 2 and property[0] == 'C' and property[1] == 'o') {
-        // Private Use
-        return (cp >= 0xE000 and cp <= 0xF8FF) or
-               (cp >= 0xF0000 and cp <= 0xFFFFD) or
-               (cp >= 0x100000 and cp <= 0x10FFFD);
-    } else if (property.len == 2 and property[0] == 'C' and property[1] == 's') {
-        // Surrogate
-        return (cp >= 0xD800 and cp <= 0xDFFF);
-    } else if (property.len == 1 and property[0] == 'M') {
-        // Mark
-        return isUnicodeProperty(cp, "Mn") or
-               isUnicodeProperty(cp, "Mc") or
-               isUnicodeProperty(cp, "Me");
-    } else if (property.len == 2 and property[0] == 'M' and property[1] == 'n') {
-        // Nonspacing Mark
-        return (cp >= 0x0300 and cp <= 0x036F) or
-               (cp >= 0x0483 and cp <= 0x0489) or
-               (cp >= 0x0591 and cp <= 0x05BD) or
-               (cp >= 0x05BF and cp <= 0x05BF) or
-               (cp >= 0x05C1 and cp <= 0x05C2) or
-               (cp >= 0x05C4 and cp <= 0x05C5) or
-               (cp >= 0x05C7 and cp <= 0x05C7) or
-               (cp >= 0x0610 and cp <= 0x061A) or
-               (cp >= 0x064B and cp <= 0x065F) or
-               (cp >= 0x0670 and cp <= 0x0670) or
-               (cp >= 0x06D6 and cp <= 0x06DC) or
-               (cp >= 0x06DF and cp <= 0x06E4) or
-               (cp >= 0x06E7 and cp <= 0x06E8) or
-               (cp >= 0x06EA and cp <= 0x06ED) or
-               (cp >= 0x0711 and cp <= 0x0711) or
-               (cp >= 0x0730 and cp <= 0x074A) or
-               (cp >= 0x07A6 and cp <= 0x07B0) or
-               (cp >= 0x07EB and cp <= 0x07F3) or
-               (cp >= 0x0816 and cp <= 0x0819) or
-               (cp >= 0x081B and cp <= 0x0823) or
-               (cp >= 0x0825 and cp <= 0x0827) or
-               (cp >= 0x0829 and cp <= 0x082D) or
-               (cp >= 0x0859 and cp <= 0x085B) or
-               (cp >= 0x08E3 and cp <= 0x0902) or
-               (cp >= 0x093A and cp <= 0x093A) or
-               (cp >= 0x093C and cp <= 0x093C) or
-               (cp >= 0x0941 and cp <= 0x0948) or
-               (cp >= 0x094D and cp <= 0x094D) or
-               (cp >= 0x0951 and cp <= 0x0957) or
-               (cp >= 0x0962 and cp <= 0x0963) or
-               (cp >= 0x0981 and cp <= 0x0981) or
-               (cp >= 0x09BC and cp <= 0x09BC) or
-               (cp >= 0x09C1 and cp <= 0x09C4) or
-               (cp >= 0x09CD and cp <= 0x09CD) or
-               (cp >= 0x09E2 and cp <= 0x09E3) or
-               (cp >= 0x0A01 and cp <= 0x0A02) or
-               (cp >= 0x0A3C and cp <= 0x0A3C) or
-               (cp >= 0x0A41 and cp <= 0x0A42) or
-               (cp >= 0x0A47 and cp <= 0x0A48) or
-               (cp >= 0x0A4B and cp <= 0x0A4D) or
-               (cp >= 0x0A51 and cp <= 0x0A51) or
-               (cp >= 0x0A70 and cp <= 0x0A71) or
-               (cp >= 0x0A75 and cp <= 0x0A75) or
-               (cp >= 0x0A81 and cp <= 0x0A82) or
-               (cp >= 0x0ABC and cp <= 0x0ABC) or
-               (cp >= 0x0AC1 and cp <= 0x0AC5) or
-               (cp >= 0x0AC7 and cp <= 0x0AC8) or
-               (cp >= 0x0ACD and cp <= 0x0ACD) or
-               (cp >= 0x0AE2 and cp <= 0x0AE3) or
-               (cp >= 0x0B01 and cp <= 0x0B01) or
-               (cp >= 0x0B3C and cp <= 0x0B3C) or
-               (cp >= 0x0B3F and cp <= 0x0B3F) or
-               (cp >= 0x0B41 and cp <= 0x0B44) or
-               (cp >= 0x0B4D and cp <= 0x0B4D) or
-               (cp >= 0x0B56 and cp <= 0x0B56) or
-               (cp >= 0x0B62 and cp <= 0x0B63) or
-               (cp >= 0x0B82 and cp <= 0x0B82) or
-               (cp >= 0x0BC0 and cp <= 0x0BC0) or
-               (cp >= 0x0BCD and cp <= 0x0BCD) or
-               (cp >= 0x0C00 and cp <= 0x0C00) or
-               (cp >= 0x0C3E and cp <= 0x0C40) or
-               (cp >= 0x0C46 and cp <= 0x0C48) or
-               (cp >= 0x0C4A and cp <= 0x0C4D) or
-               (cp >= 0x0C55 and cp <= 0x0C56) or
-               (cp >= 0x0C62 and cp <= 0x0C63) or
-               (cp >= 0x0C81 and cp <= 0x0C81) or
-               (cp >= 0x0CBC and cp <= 0x0CBC) or
-               (cp >= 0x0CBF and cp <= 0x0CBF) or
-               (cp >= 0x0CC6 and cp <= 0x0CC6) or
-               (cp >= 0x0CCC and cp <= 0x0CCD) or
-               (cp >= 0x0CE2 and cp <= 0x0CE3) or
-               (cp >= 0x0D01 and cp <= 0x0D01) or
-               (cp >= 0x0D41 and cp <= 0x0D44) or
-               (cp >= 0x0D4D and cp <= 0x0D4D) or
-               (cp >= 0x0D62 and cp <= 0x0D63) or
-               (cp >= 0x0DCA and cp <= 0x0DCA) or
-               (cp >= 0x0DD2 and cp <= 0x0DD4) or
-               (cp >= 0x0DD6 and cp <= 0x0DD6) or
-               (cp >= 0x0E31 and cp <= 0x0E31) or
-               (cp >= 0x0E34 and cp <= 0x0E3A) or
-               (cp >= 0x0E47 and cp <= 0x0E4E) or
-               (cp >= 0x0EB1 and cp <= 0x0EB1) or
-               (cp >= 0x0EB4 and cp <= 0x0EB9) or
-               (cp >= 0x0EBB and cp <= 0x0EBC) or
-               (cp >= 0x0EC8 and cp <= 0x0ECD) or
-               (cp >= 0x0F18 and cp <= 0x0F19) or
-               (cp >= 0x0F35 and cp <= 0x0F35) or
-               (cp >= 0x0F37 and cp <= 0x0F37) or
-               (cp >= 0x0F39 and cp <= 0x0F39) or
-               (cp >= 0x0F71 and cp <= 0x0F7E) or
-               (cp >= 0x0F80 and cp <= 0x0F84) or
-               (cp >= 0x0F86 and cp <= 0x0F87) or
-               (cp >= 0x0F8D and cp <= 0x0F97) or
-               (cp >= 0x0F99 and cp <= 0x0FBC) or
-               (cp >= 0x0FC6 and cp <= 0x0FC6) or
-               (cp >= 0x102D and cp <= 0x1030) or
-               (cp >= 0x1032 and cp <= 0x1037) or
-               (cp >= 0x1039 and cp <= 0x103A) or
-               (cp >= 0x103D and cp <= 0x103E) or
-               (cp >= 0x1058 and cp <= 0x1059) or
-               (cp >= 0x105E and cp <= 0x1060) or
-               (cp >= 0x1071 and cp <= 0x1074) or
-               (cp >= 0x1082 and cp <= 0x1082) or
-               (cp >= 0x1085 and cp <= 0x1086) or
-               (cp >= 0x108D and cp <= 0x108D) or
-               (cp >= 0x109D and cp <= 0x109D) or
-               (cp >= 0x135D and cp <= 0x135F) or
-               (cp >= 0x1712 and cp <= 0x1714) or
-               (cp >= 0x1732 and cp <= 0x1734) or
-               (cp >= 0x1752 and cp <= 0x1753) or
-               (cp >= 0x1772 and cp <= 0x1773) or
-               (cp >= 0x17B4 and cp <= 0x17B5) or
-               (cp >= 0x17B7 and cp <= 0x17BD) or
-               (cp >= 0x17C6 and cp <= 0x17C6) or
-               (cp >= 0x17C9 and cp <= 0x17D3) or
-               (cp >= 0x17DD and cp <= 0x17DD) or
-               (cp >= 0x180B and cp <= 0x180D) or
-               (cp >= 0x1885 and cp <= 0x1886) or
-               (cp >= 0x18A9 and cp <= 0x18A9) or
-               (cp >= 0x1920 and cp <= 0x1922) or
-               (cp >= 0x1927 and cp <= 0x1928) or
-               (cp >= 0x1932 and cp <= 0x1932) or
-               (cp >= 0x1939 and cp <= 0x193B) or
-               (cp >= 0x1A17 and cp <= 0x1A18) or
-               (cp >= 0x1A56 and cp <= 0x1A56) or
-               (cp >= 0x1A58 and cp <= 0x1A5E) or
-               (cp >= 0x1A60 and cp <= 0x1A60) or
-               (cp >= 0x1A62 and cp <= 0x1A62) or
-               (cp >= 0x1A65 and cp <= 0x1A6C) or
-               (cp >= 0x1A73 and cp <= 0x1A7C) or
-               (cp >= 0x1A7F and cp <= 0x1A7F) or
-               (cp >= 0x1AB0 and cp <= 0x1ABD) or
-               (cp >= 0x1B00 and cp <= 0x1B03) or
-               (cp >= 0x1B34 and cp <= 0x1B34) or
-               (cp >= 0x1B36 and cp <= 0x1B3A) or
-               (cp >= 0x1B3C and cp <= 0x1B3C) or
-               (cp >= 0x1B42 and cp <= 0x1B42) or
-               (cp >= 0x1B6B and cp <= 0x1B73) or
-               (cp >= 0x1B80 and cp <= 0x1B81) or
-               (cp >= 0x1BA2 and cp <= 0x1BA5) or
-               (cp >= 0x1BA8 and cp <= 0x1BA9) or
-               (cp >= 0x1BAB and cp <= 0x1BAD) or
-               (cp >= 0x1BE6 and cp <= 0x1BE6) or
-               (cp >= 0x1BE8 and cp <= 0x1BE9) or
-               (cp >= 0x1BED and cp <= 0x1BED) or
-               (cp >= 0x1BEF and cp <= 0x1BF1) or
-               (cp >= 0x1C2C and cp <= 0x1C33) or
-               (cp >= 0x1C36 and cp <= 0x1C37) or
-               (cp >= 0x1CD0 and cp <= 0x1CD2) or
-               (cp >= 0x1CD4 and cp <= 0x1CE0) or
-               (cp >= 0x1CE2 and cp <= 0x1CE8) or
-               (cp >= 0x1CED and cp <= 0x1CED) or
-               (cp >= 0x1CF4 and cp <= 0x1CF4) or
-               (cp >= 0x1CF8 and cp <= 0x1CF9) or
-               (cp >= 0x1DC0 and cp <= 0x1DF5) or
-               (cp >= 0x1DFC and cp <= 0x1DFF) or
-               (cp >= 0x20D0 and cp <= 0x20DC) or
-               (cp >= 0x20E1 and cp <= 0x20E1) or
-               (cp >= 0x20E5 and cp <= 0x20F0) or
-               (cp >= 0x2CEF and cp <= 0x2CF1) or
-               (cp >= 0x2D7F and cp <= 0x2D7F) or
-               (cp >= 0x2DE0 and cp <= 0x2DFF) or
-               (cp >= 0x302A and cp <= 0x302D) or
-               (cp >= 0x3099 and cp <= 0x309A) or
-               (cp >= 0xA66F and cp <= 0xA66F) or
-               (cp >= 0xA674 and cp <= 0xA67D) or
-               (cp >= 0xA69E and cp <= 0xA69F) or
-               (cp >= 0xA6F0 and cp <= 0xA6F1) or
-               (cp >= 0xA802 and cp <= 0xA802) or
-               (cp >= 0xA806 and cp <= 0xA806) or
-               (cp >= 0xA80B and cp <= 0xA80B) or
-               (cp >= 0xA825 and cp <= 0xA826) or
-               (cp >= 0xA8C4 and cp <= 0xA8C5) or
-               (cp >= 0xA8E0 and cp <= 0xA8F1) or
-               (cp >= 0xA926 and cp <= 0xA92D) or
-               (cp >= 0xA947 and cp <= 0xA951) or
-               (cp >= 0xA980 and cp <= 0xA982) or
-               (cp >= 0xA9B3 and cp <= 0xA9B3) or
-               (cp >= 0xA9B6 and cp <= 0xA9B9) or
-               (cp >= 0xA9BC and cp <= 0xA9BC) or
-               (cp >= 0xA9E5 and cp <= 0xA9E5) or
-               (cp >= 0xAA29 and cp <= 0xAA2E) or
-               (cp >= 0xAA31 and cp <= 0xAA32) or
-               (cp >= 0xAA35 and cp <= 0xAA36) or
-               (cp >= 0xAA43 and cp <= 0xAA43) or
-               (cp >= 0xAA4C and cp <= 0xAA4C) or
-               (cp >= 0xAA7C and cp <= 0xAA7C) or
-               (cp >= 0xAAB0 and cp <= 0xAAB0) or
-               (cp >= 0xAAB2 and cp <= 0xAAB4) or
-               (cp >= 0xAAB7 and cp <= 0xAAB8) or
-               (cp >= 0xAABE and cp <= 0xAABF) or
-               (cp >= 0xAAC1 and cp <= 0xAAC1) or
-               (cp >= 0xAAEC and cp <= 0xAAED) or
-               (cp >= 0xAAF6 and cp <= 0xAAF6) or
-               (cp >= 0xABE5 and cp <= 0xABE5) or
-               (cp >= 0xABE8 and cp <= 0xABE8) or
-               (cp >= 0xABED and cp <= 0xABED) or
-               (cp >= 0xFB1E and cp <= 0xFB1E) or
-               (cp >= 0xFE00 and cp <= 0xFE0F) or
-               (cp >= 0xFE20 and cp <= 0xFE2F);
-    } else if (property.len == 2 and property[0] == 'M' and property[1] == 'c') {
-        // Spacing Combining Mark
-        return (cp >= 0x0903 and cp <= 0x0903) or
-               (cp >= 0x093B and cp <= 0x093B) or
-               (cp >= 0x093E and cp <= 0x0940) or
-               (cp >= 0x0949 and cp <= 0x094C) or
-               (cp >= 0x094E and cp <= 0x094E) or
-               (cp >= 0x0955 and cp <= 0x0957) or
-               (cp >= 0x0962 and cp <= 0x0963) or
-               (cp >= 0x0982 and cp <= 0x0983) or
-               (cp >= 0x09BE and cp <= 0x09C0) or
-               (cp >= 0x09C7 and cp <= 0x09C8) or
-               (cp >= 0x09CB and cp <= 0x09CC) or
-               (cp >= 0x09D7 and cp <= 0x09D7) or
-               (cp >= 0x0A03 and cp <= 0x0A03) or
-               (cp >= 0x0A3E and cp <= 0x0A40) or
-               (cp >= 0x0A83 and cp <= 0x0A83) or
-               (cp >= 0x0ABE and cp <= 0x0AC0) or
-               (cp >= 0x0AC9 and cp <= 0x0AC9) or
-               (cp >= 0x0ACB and cp <= 0x0ACC) or
-               (cp >= 0x0AD0 and cp <= 0x0AD0) or
-               (cp >= 0x0B02 and cp <= 0x0B03) or
-               (cp >= 0x0B3E and cp <= 0x0B3E) or
-               (cp >= 0x0B40 and cp <= 0x0B40) or
-               (cp >= 0x0B47 and cp <= 0x0B48) or
-               (cp >= 0x0B4B and cp <= 0x0B4C) or
-               (cp >= 0x0B57 and cp <= 0x0B57) or
-               (cp >= 0x0BBE and cp <= 0x0BBF) or
-               (cp >= 0x0BC1 and cp <= 0x0BC2) or
-               (cp >= 0x0BC6 and cp <= 0x0BC8) or
-               (cp >= 0x0BCA and cp <= 0x0BCC) or
-               (cp >= 0x0BD7 and cp <= 0x0BD7) or
-               (cp >= 0x0C01 and cp <= 0x0C03) or
-               (cp >= 0x0C41 and cp <= 0x0C44) or
-               (cp >= 0x0C82 and cp <= 0x0C83) or
-               (cp >= 0x0CBE and cp <= 0x0CBE) or
-               (cp >= 0x0CC0 and cp <= 0x0CC4) or
-               (cp >= 0x0CC7 and cp <= 0x0CC8) or
-               (cp >= 0x0CCA and cp <= 0x0CCB) or
-               (cp >= 0x0CD5 and cp <= 0x0CD6) or
-               (cp >= 0x0D02 and cp <= 0x0D03) or
-               (cp >= 0x0D3E and cp <= 0x0D40) or
-               (cp >= 0x0D46 and cp <= 0x0D48) or
-               (cp >= 0x0D4A and cp <= 0x0D4C) or
-               (cp >= 0x0D57 and cp <= 0x0D57) or
-               (cp >= 0x0D82 and cp <= 0x0D83) or
-               (cp >= 0x0DCF and cp <= 0x0DD1) or
-               (cp >= 0x0DD8 and cp <= 0x0DDF) or
-               (cp >= 0x0DF2 and cp <= 0x0DF3) or
-               (cp >= 0x0F3E and cp <= 0x0F3F) or
-               (cp >= 0x0F7F and cp <= 0x0F7F) or
-               (cp >= 0x102B and cp <= 0x102C) or
-               (cp >= 0x1031 and cp <= 0x1031) or
-               (cp >= 0x1038 and cp <= 0x1038) or
-               (cp >= 0x103B and cp <= 0x103C) or
-               (cp >= 0x1056 and cp <= 0x1057) or
-               (cp >= 0x1062 and cp <= 0x1064) or
-               (cp >= 0x1067 and cp <= 0x106D) or
-               (cp >= 0x1083 and cp <= 0x1084) or
-               (cp >= 0x1087 and cp <= 0x108C) or
-               (cp >= 0x108F and cp <= 0x108F) or
-               (cp >= 0x109A and cp <= 0x109C) or
-               (cp >= 0x17B6 and cp <= 0x17B6) or
-               (cp >= 0x17BE and cp <= 0x17C5) or
-               (cp >= 0x17C7 and cp <= 0x17C8) or
-               (cp >= 0x1923 and cp <= 0x1926) or
-               (cp >= 0x1929 and cp <= 0x192B) or
-               (cp >= 0x1930 and cp <= 0x1931) or
-               (cp >= 0x1933 and cp <= 0x1938) or
-               (cp >= 0x1A19 and cp <= 0x1A1A) or
-               (cp >= 0x1A55 and cp <= 0x1A55) or
-               (cp >= 0x1A57 and cp <= 0x1A57) or
-               (cp >= 0x1A61 and cp <= 0x1A61) or
-               (cp >= 0x1A63 and cp <= 0x1A64) or
-               (cp >= 0x1A6D and cp <= 0x1A72) or
-               (cp >= 0x1B04 and cp <= 0x1B04) or
-               (cp >= 0x1B35 and cp <= 0x1B35) or
-               (cp >= 0x1B3B and cp <= 0x1B3B) or
-               (cp >= 0x1B3D and cp <= 0x1B41) or
-               (cp >= 0x1B43 and cp <= 0x1B44) or
-               (cp >= 0x1B82 and cp <= 0x1B82) or
-               (cp >= 0x1BA1 and cp <= 0x1BA1) or
-               (cp >= 0x1BA6 and cp <= 0x1BA7) or
-               (cp >= 0x1BAA and cp <= 0x1BAA) or
-               (cp >= 0x1BE7 and cp <= 0x1BE7) or
-               (cp >= 0x1BEA and cp <= 0x1BEC) or
-               (cp >= 0x1BEE and cp <= 0x1BEE) or
-               (cp >= 0x1BF2 and cp <= 0x1BF3) or
-               (cp >= 0x1C24 and cp <= 0x1C2B) or
-               (cp >= 0x1C34 and cp <= 0x1C35) or
-               (cp >= 0x1CE1 and cp <= 0x1CE1) or
-               (cp >= 0x1CF7 and cp <= 0x1CF7) or
-               (cp >= 0xA823 and cp <= 0xA824) or
-               (cp >= 0xA827 and cp <= 0xA827) or
-               (cp >= 0xA880 and cp <= 0xA881) or
-               (cp >= 0xA8B4 and cp <= 0xA8C3) or
-               (cp >= 0xA952 and cp <= 0xA953) or
-               (cp >= 0xA983 and cp <= 0xA983) or
-               (cp >= 0xA9B4 and cp <= 0xA9B5) or
-               (cp >= 0xA9BA and cp <= 0xA9BB) or
-               (cp >= 0xA9BD and cp <= 0xA9C0) or
-               (cp >= 0xAA2F and cp <= 0xAA30) or
-               (cp >= 0xAA33 and cp <= 0xAA34) or
-               (cp >= 0xAA4D and cp <= 0xAA4D) or
-               (cp >= 0xAA7B and cp <= 0xAA7B) or
-               (cp >= 0xAA7D and cp <= 0xAA7D) or
-               (cp >= 0xAABE and cp <= 0xAABF) or
-               (cp >= 0xAAC0 and cp <= 0xAAC0) or
-               (cp >= 0xAAC2 and cp <= 0xAAC2) or
-               (cp >= 0xAADB and cp <= 0xAADC) or
-               (cp >= 0xAAF2 and cp <= 0xAAF2) or
-               (cp >= 0xAB01 and cp <= 0xAB06) or
-               (cp >= 0xAB09 and cp <= 0xAB0E) or
-               (cp >= 0xAB11 and cp <= 0xAB16) or
-               (cp >= 0xAB20 and cp <= 0xAB26) or
-               (cp >= 0xAB28 and cp <= 0xAB2E) or
-               (cp >= 0xAB30 and cp <= 0xAB5A) or
-               (cp >= 0xAB5C and cp <= 0xAB5F) or
-               (cp >= 0xAB60 and cp <= 0xAB65);
-    } else if (property.len == 2 and property[0] == 'M' and property[1] == 'e') {
-        // Enclosing Mark
-        return (cp >= 0x0488 and cp <= 0x0489) or
-               (cp >= 0x1ABE and cp <= 0x1ABE) or
-               (cp >= 0x20DD and cp <= 0x20E0) or
-               (cp >= 0x20E2 and cp <= 0x20E4) or
-               (cp >= 0xA670 and cp <= 0xA672);
+    if (property.len == 1) {
+        switch (property[0]) {
+            'L' => return isUnicodeProperty(cp, "Lu") or
+                          isUnicodeProperty(cp, "Ll") or
+                          isUnicodeProperty(cp, "Lt") or
+                          isUnicodeProperty(cp, "Lm") or
+                          isUnicodeProperty(cp, "Lo"),
+            'N' => return isUnicodeProperty(cp, "Nd") or
+                          isUnicodeProperty(cp, "Nl") or
+                          isUnicodeProperty(cp, "No"),
+            'P' => return isUnicodeProperty(cp, "Pc") or
+                          isUnicodeProperty(cp, "Pd") or
+                          isUnicodeProperty(cp, "Ps") or
+                          isUnicodeProperty(cp, "Pe") or
+                          isUnicodeProperty(cp, "Pi") or
+                          isUnicodeProperty(cp, "Pf") or
+                          isUnicodeProperty(cp, "Po"),
+            'S' => return isUnicodeProperty(cp, "Sc") or
+                          isUnicodeProperty(cp, "Sk") or
+                          isUnicodeProperty(cp, "Sm") or
+                          isUnicodeProperty(cp, "So"),
+            'Z' => return isUnicodeProperty(cp, "Zs") or
+                          isUnicodeProperty(cp, "Zl") or
+                          isUnicodeProperty(cp, "Zp"),
+            'C' => return isUnicodeProperty(cp, "Cc") or
+                          isUnicodeProperty(cp, "Cf") or
+                          isUnicodeProperty(cp, "Co") or
+                          isUnicodeProperty(cp, "Cs"),
+            'M' => return isUnicodeProperty(cp, "Mn") or
+                          isUnicodeProperty(cp, "Mc") or
+                          isUnicodeProperty(cp, "Me"),
+            else => return false,
+        }
+    }
+    if (property.len == 2) {
+        switch (property[0]) {
+            'L' => switch (property[1]) {
+                'u' => return inUnicodeRanges(cp, &_Lu_ranges) or
+                        (cp >= 0x0100 and cp <= 0x0136 and cp % 2 == 0) or
+                        (cp >= 0x0139 and cp <= 0x0147 and cp % 2 == 1) or
+                        (cp >= 0x014A and cp <= 0x0176 and cp % 2 == 0),
+                'l' => return inUnicodeRanges(cp, &_Ll_ranges) or
+                        (cp >= 0x0101 and cp <= 0x0137 and cp % 2 == 1) or
+                        (cp >= 0x013A and cp <= 0x0148 and cp % 2 == 0) or
+                        (cp >= 0x014B and cp <= 0x0177 and cp % 2 == 1) or
+                        (cp >= 0x017A and cp <= 0x017E and cp % 2 == 0),
+                't' => return inUnicodeRanges(cp, &_Lt_ranges),
+                'm' => return inUnicodeRanges(cp, &_Lm_ranges),
+                'o' => return inUnicodeRanges(cp, &_Lo_ranges),
+                else => return false,
+            },
+            'N' => switch (property[1]) {
+                'd' => return inUnicodeRanges(cp, &_Nd_ranges),
+                'l' => return inUnicodeRanges(cp, &_Nl_ranges),
+                'o' => return inUnicodeRanges(cp, &_No_ranges),
+                else => return false,
+            },
+            'P' => switch (property[1]) {
+                'c' => return inUnicodeRanges(cp, &_Pc_ranges),
+                'd' => return inUnicodeRanges(cp, &_Pd_ranges),
+                's' => return inUnicodeRanges(cp, &_Ps_ranges),
+                'e' => return inUnicodeRanges(cp, &_Pe_ranges),
+                'i' => return inUnicodeRanges(cp, &_Pi_ranges),
+                'f' => return inUnicodeRanges(cp, &_Pf_ranges),
+                'o' => return inUnicodeRanges(cp, &_Po_ranges),
+                else => return false,
+            },
+            'S' => switch (property[1]) {
+                'c' => return inUnicodeRanges(cp, &_Sc_ranges),
+                'k' => return inUnicodeRanges(cp, &_Sk_ranges),
+                'm' => return inUnicodeRanges(cp, &_Sm_ranges),
+                'o' => return inUnicodeRanges(cp, &_So_ranges),
+                else => return false,
+            },
+            'Z' => switch (property[1]) {
+                's' => return inUnicodeRanges(cp, &_Zs_ranges),
+                'l' => return inUnicodeRanges(cp, &_Zl_ranges),
+                'p' => return inUnicodeRanges(cp, &_Zp_ranges),
+                else => return false,
+            },
+            'C' => switch (property[1]) {
+                'c' => return inUnicodeRanges(cp, &_Cc_ranges),
+                'f' => return inUnicodeRanges(cp, &_Cf_ranges),
+                'o' => return inUnicodeRanges(cp, &_Co_ranges),
+                's' => return inUnicodeRanges(cp, &_Cs_ranges),
+                else => return false,
+            },
+            'M' => switch (property[1]) {
+                'n' => return inUnicodeRanges(cp, &_Mn_ranges),
+                'c' => return inUnicodeRanges(cp, &_Mc_ranges),
+                'e' => return inUnicodeRanges(cp, &_Me_ranges),
+                else => return false,
+            },
+            else => return false,
+        }
     } else if (property.len == 3 and property[0] == 'H' and property[1] == 'a' and property[2] == 'n') {
         return (cp >= 0x4E00 and cp <= 0x9FFF) or
                (cp >= 0x3400 and cp <= 0x4DBF) or
@@ -1906,7 +2049,7 @@ fn isUnicodeWordChar(input: []const u8, pos: usize) bool {
 
 /// Check if a character at position `pos` matches any Unicode property in the given CharClass.
 /// Returns the byte length of the matched UTF-8 sequence, or null if no match.
-fn matchUnicodePropertyInClass(input: []const u8, pos: usize, cc: @import("parser.zig").CharClass) ?usize {
+fn matchUnicodePropertyInClass(input: []const u8, pos: usize, cc: *const @import("parser.zig").CharClass) ?usize {
     if (pos >= input.len or cc.unicode_properties.items.len == 0) return null;
 
     const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch 1;
@@ -1917,24 +2060,12 @@ fn matchUnicodePropertyInClass(input: []const u8, pos: usize, cc: @import("parse
     else
         std.unicode.utf8Decode(input[pos..pos + actual_len]) catch @as(u21, input[pos]);
 
-    var matches = false;
     for (cc.unicode_properties.items) |entry| {
-        var prop_match = isUnicodeProperty(cp, entry.name);
-        if (entry.negated) {
-            prop_match = !prop_match;
-        }
-        if (prop_match) {
-            matches = true;
-            break;
+        if (isUnicodeProperty(cp, entry.name) != entry.negated) {
+            return matchPropertyResult(true, cc.negated, actual_len);
         }
     }
-
-    if (cc.negated) {
-        matches = !matches;
-    }
-
-    if (matches) return actual_len;
-    return null;
+    return matchPropertyResult(false, cc.negated, actual_len);
 }
 
 /// Check if the character at pos is a line ending character (single char, not CRLF).
@@ -2010,7 +2141,9 @@ pub const Vm = struct {
     options: RegexOptions,
     atomic_stack: std.ArrayList(usize) = .empty,
     last_match_end: usize = 0,
-    last_pos: std.ArrayList(?usize) = .empty,
+    last_pos: std.ArrayList(usize) = .empty,
+    last_pos_gen: std.ArrayList(u32) = .empty,
+    match_generation: u32 = 0,
     // Reusable per-match buffer for captures (size is fixed after compile)
     captures_buf: std.ArrayList(?usize) = .empty,
 
@@ -2022,11 +2155,14 @@ pub const Vm = struct {
             .atomic_stack = .empty,
             .last_match_end = 0,
             .last_pos = .empty,
+            .last_pos_gen = .empty,
+            .match_generation = 0,
             .captures_buf = .empty,
         };
         // Pre-allocate fixed-size buffers based on bytecode size
         try vm.captures_buf.resize(allocator, (bytecode.num_groups + 1) * 2);
         try vm.last_pos.resize(allocator, bytecode.instructions.items.len);
+        try vm.last_pos_gen.resize(allocator, bytecode.instructions.items.len);
         try vm.atomic_stack.ensureTotalCapacity(allocator, 64);
         return vm;
     }
@@ -2034,11 +2170,15 @@ pub const Vm = struct {
     pub fn deinit(self: *Vm) void {
         self.atomic_stack.deinit(self.allocator);
         self.last_pos.deinit(self.allocator);
+        self.last_pos_gen.deinit(self.allocator);
         self.captures_buf.deinit(self.allocator);
+        self.bytecode.deinit();
     }
 
     /// Shared VM execution engine.
-    fn execInternal(comptime is_sub: bool, self: *Vm, input: []const u8, start_pos: usize, start_pc: usize, end_pc: usize) !MatchResult {
+    /// When `return_captures` is false, the returned MatchResult borrows the internal
+    /// captures buffer. The caller must not use the captures after the next exec call.
+    fn execInternal(comptime is_sub: bool, comptime return_captures: bool, self: *Vm, input: []const u8, start_pos: usize, start_pc: usize, end_pc: usize) !MatchResult {
         // Use pre-allocated captures buffer, resizing only if bytecode grew
         const captures_needed = (self.bytecode.num_groups + 1) * 2;
         if (self.captures_buf.items.len < captures_needed) {
@@ -2051,33 +2191,37 @@ pub const Vm = struct {
             @memset(captures.items, null);
         }
 
-        var stack: std.ArrayList(Frame) = .empty;
-        defer stack.deinit(self.allocator);
+        var stack_local: std.ArrayList(Frame) = .empty;
+        defer stack_local.deinit(self.allocator);
+        try stack_local.ensureTotalCapacity(self.allocator, 64);
+        var stack: *std.ArrayList(Frame) = &stack_local;
+
+        var subroutine_stack_local: std.ArrayList(usize) = .empty;
+        defer subroutine_stack_local.deinit(self.allocator);
+        try subroutine_stack_local.ensureTotalCapacity(self.allocator, 32);
+        var subroutine_stack: *std.ArrayList(usize) = &subroutine_stack_local;
 
         var pc: usize = start_pc;
         var pos: usize = start_pos;
         var matched = false;
         var match_end: usize = start_pos;
         var step_counter: usize = 0;
-        const max_steps = self.options.max_steps;
 
         if (!is_sub) {
             if (self.last_pos.items.len < self.bytecode.instructions.items.len) {
                 try self.last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
+                try self.last_pos_gen.resize(self.allocator, self.bytecode.instructions.items.len);
             }
-            @memset(self.last_pos.items, null);
+            self.match_generation +%= 1;
         }
-
-        var subroutine_stack: std.ArrayList(usize) = .empty;
-        defer subroutine_stack.deinit(self.allocator);
 
         const final_pc = if (is_sub) end_pc else self.bytecode.instructions.items.len;
 
         while (true) {
-            if (max_steps) |limit| {
-                if (step_counter >= limit) break;
+            if (self.options.max_steps) |max| {
+                if (step_counter >= max) break;
+                step_counter += 1;
             }
-            step_counter += 1;
 
             if (pc >= final_pc) {
                 if (is_sub) {
@@ -2087,67 +2231,92 @@ pub const Vm = struct {
                 } else {
                     if (stack.items.len == 0) break;
                     const frame = stack.pop().?;
-                    backtrack(false, frame, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                    backtrack(false, frame, &captures, &pc, &pos, subroutine_stack, &self.options);
                     continue;
                 }
             }
 
             const inst = self.bytecode.instructions.items[pc];
 
-            switch (inst.opcode) {
-                .Char => {
+            switch (inst) {
+                .Char => |pat| {
                     var matches = false;
                     if (pos < input.len) {
                         const ch = input[pos];
-                        const pat = inst.char.?;
                         if (self.options.case_sensitive or ch >= 128 or pat >= 128) {
                             matches = ch == pat;
                         } else {
                             matches = std.ascii.toLower(ch) == std.ascii.toLower(pat);
                         }
                     }
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matches, 1)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matches, 1)) break;
                 },
-                .CharUtf8 => {
-                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchCharUtf8(input, pos, inst.char_codepoint.?, self.options.case_sensitive))) break;
+                .String => |pat| {
+                    var matches = false;
+                    var advance_len: usize = 0;
+                    if (pos + pat.len <= input.len) {
+                        const slice = input[pos..pos + pat.len];
+                        if (self.options.case_sensitive) {
+                            matches = std.mem.eql(u8, slice, pat);
+                            advance_len = pat.len;
+                        } else {
+                            // Case-insensitive: check ASCII chars with toLower
+                            matches = true;
+                            for (pat, slice) |p, s| {
+                                if (p >= 128 or s >= 128) {
+                                    if (p != s) {
+                                        matches = false;
+                                        break;
+                                    }
+                                } else if (std.ascii.toLower(p) != std.ascii.toLower(s)) {
+                                    matches = false;
+                                    break;
+                                }
+                            }
+                            advance_len = pat.len;
+                        }
+                    }
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matches, advance_len)) break;
+                },
+                .CharUtf8 => |cp| {
+                    if (!tryMatchOpt(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchCharUtf8(input, pos, cp, self.options.case_sensitive))) break;
                 },
                 .Any => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos < input.len and (self.options.dot_matches_newline or input[pos] != '\n'), 1)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos < input.len and (self.options.dot_matches_newline or input[pos] != '\n'), 1)) break;
                 },
-                .CharClass => {
-                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchCharClass(inst, input, pos, self.options.case_sensitive))) break;
+                .CharClass => |cc| {
+                    if (!tryMatchOpt(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchCharClass(cc, input, pos, self.options.case_sensitive))) break;
                 },
-                .UnicodeProperty => {
-                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchUnicodeProperty(input, pos, inst.unicode_property.?, inst.unicode_negated))) break;
+                .UnicodeProperty => |p| {
+                    if (!tryMatchOpt(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchUnicodeProperty(input, pos, p.property, p.negated))) break;
                 },
                 .GraphemeCluster => {
-                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchGraphemeCluster(input, pos))) break;
+                    if (!tryMatchOpt(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchGraphemeCluster(input, pos))) break;
                 },
                 .Newline => {
-                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchNewline(input, pos))) break;
+                    if (!tryMatchOpt(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchNewline(input, pos))) break;
                 },
                 .ResetMatchStart => {
                     captures.items[0] = pos;
                     pc += 1;
                 },
                 .NotNewline => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos < input.len and input[pos] != '\n', 1)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos < input.len and input[pos] != '\n', 1)) break;
                 },
                 .NotVerticalWhitespace => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos < input.len and isLineEndingChar(input, pos) == null, 1)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos < input.len and isLineEndingChar(input, pos) == null, 1)) break;
                 },
-                .Split => {
+                .Split => |target| {
                     if (!is_sub) {
-                        if (self.last_pos.items[pc]) |lp| {
-                            if (lp == pos) {
-                                pc = inst.target.?;
-                                continue;
-                            }
+                        if (self.last_pos_gen.items[pc] == self.match_generation and self.last_pos.items[pc] == pos) {
+                            pc = target;
+                            continue;
                         }
+                        self.last_pos_gen.items[pc] = self.match_generation;
                         self.last_pos.items[pc] = pos;
                     }
                     try stack.append(self.allocator, .{
-                        .pc = inst.target.?,
+                        .pc = target,
                         .pos = pos,
                         .capture_slot = null,
                         .capture_old_value = null,
@@ -2156,11 +2325,10 @@ pub const Vm = struct {
                     });
                     pc += 1;
                 },
-                .Jmp => {
-                    pc = inst.target.?;
+                .Jmp => |target| {
+                    pc = target;
                 },
-                .Save => {
-                    const slot = inst.save_slot.?;
+                .Save => |slot| {
                     const old_val = captures.items[slot];
                     captures.items[slot] = pos;
                     var frame = Frame{
@@ -2188,8 +2356,8 @@ pub const Vm = struct {
                     }
                     break;
                 },
-                .SetOption => {
-                    self.options = inst.options.?;
+                .SetOption => |opts| {
+                    self.options = opts;
                     pc += 1;
                 },
                 .AtomicStart => {
@@ -2205,8 +2373,8 @@ pub const Vm = struct {
                     }
                     pc += 1;
                 },
-                .Conditional => {
-                    const group_idx = inst.backref_group.?;
+                .Conditional => |c| {
+                    const group_idx = c.group;
                     const start_slot = group_idx * 2;
                     const end_slot = group_idx * 2 + 1;
                     var condition_met = false;
@@ -2218,32 +2386,32 @@ pub const Vm = struct {
                     if (condition_met) {
                         pc += 1;
                     } else {
-                        pc = inst.target.?;
+                        pc = c.target;
                     }
                 },
-                .Backref => {
-                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchBackref(input, pos, captures.items, inst.backref_group.?, self.options.case_sensitive))) break;
+                .Backref => |group| {
+                    if (!tryMatchOpt(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchBackref(input, pos, captures.items, group, self.options.case_sensitive))) break;
                 },
                 .WordBoundary => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, checkWordBoundary(input, pos), 0)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, checkWordBoundary(input, pos), 0)) break;
                 },
                 .NotWordBoundary => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, !checkWordBoundary(input, pos), 0)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, !checkWordBoundary(input, pos), 0)) break;
                 },
                 .AssertStart => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, checkAssertStart(pos, input, self.options.multiline), 0)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, checkAssertStart(pos, input, self.options.multiline), 0)) break;
                 },
                 .AssertEnd => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, checkAssertEnd(pos, input, self.options.multiline), 0)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, checkAssertEnd(pos, input, self.options.multiline), 0)) break;
                 },
                 .AssertStringStart => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos == 0, 0)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos == 0, 0)) break;
                 },
                 .AssertStringEnd => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos == input.len, 0)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos == input.len, 0)) break;
                 },
                 .AssertStringEndAllowNewline => {
-                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos == input.len or (pos + 1 == input.len and input[pos] == '\n'), 0)) break;
+                    if (!tryMatch(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos == input.len or (pos + 1 == input.len and input[pos] == '\n'), 0)) break;
                 },
                 .AssertMatchStart => {
                     if (is_sub) {
@@ -2253,42 +2421,51 @@ pub const Vm = struct {
                             pc += 1;
                         } else {
                             if (stack.items.len == 0) break;
-                            backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, &subroutine_stack, &self.options);
+                            backtrack(is_sub, stack.pop().?, &captures, &pc, &pos, subroutine_stack, &self.options);
                         }
                     }
                 },
                 .AssertForward => {
                     const epc = self.bytecode.assert_ends.items[pc];
-                    var sub_result = try execInternal(true, self, input, pos, pc + 1, epc);
+                    var sub_result = try execInternal(true, false, self, input, pos, pc + 1, epc);
                     defer sub_result.deinit();
                     if (sub_result.matched) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertForwardNegative => {
                     const epc = self.bytecode.assert_ends.items[pc];
-                    var sub_result = try execInternal(true, self, input, pos, pc + 1, epc);
+                    var sub_result = try execInternal(true, false, self, input, pos, pc + 1, epc);
                     defer sub_result.deinit();
                     if (!sub_result.matched) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertForwardEnd => {
                     pc += 1;
                 },
-                .AssertBackward => {
+                .AssertBackward => |width| {
                     const epc = self.bytecode.assert_ends.items[pc];
                     var success = false;
-                    var try_pos: usize = 0;
-                    while (try_pos <= pos) : (try_pos += 1) {
-                        var sub_result = try execInternal(true, self, input, try_pos, pc + 1, epc);
-                        defer sub_result.deinit();
-                        if (sub_result.matched) {
-                            if (sub_result.end == pos) {
+                    if (width) |w| {
+                        if (pos >= w) {
+                            const try_pos = pos - w;
+                            var sub_result = try execInternal(true, false, self, input, try_pos, pc + 1, epc);
+                            defer sub_result.deinit();
+                            if (sub_result.matched and sub_result.end == pos) {
+                                success = true;
+                            }
+                        }
+                    } else {
+                        var try_pos: usize = 0;
+                        while (try_pos <= pos) : (try_pos += 1) {
+                            var sub_result = try execInternal(true, false, self, input, try_pos, pc + 1, epc);
+                            defer sub_result.deinit();
+                            if (sub_result.matched and sub_result.end == pos) {
                                 success = true;
                                 break;
                             }
@@ -2297,18 +2474,27 @@ pub const Vm = struct {
                     if (success) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
-                .AssertBackwardNegative => {
+                .AssertBackwardNegative => |width| {
                     const epc = self.bytecode.assert_ends.items[pc];
                     var success = true;
-                    var try_pos: usize = 0;
-                    while (try_pos <= pos) : (try_pos += 1) {
-                        var sub_result = try execInternal(true, self, input, try_pos, pc + 1, epc);
-                        defer sub_result.deinit();
-                        if (sub_result.matched) {
-                            if (sub_result.end == pos) {
+                    if (width) |w| {
+                        if (pos >= w) {
+                            const try_pos = pos - w;
+                            var sub_result = try execInternal(true, false, self, input, try_pos, pc + 1, epc);
+                            defer sub_result.deinit();
+                            if (sub_result.matched and sub_result.end == pos) {
+                                success = false;
+                            }
+                        }
+                    } else {
+                        var try_pos: usize = 0;
+                        while (try_pos <= pos) : (try_pos += 1) {
+                            var sub_result = try execInternal(true, false, self, input, try_pos, pc + 1, epc);
+                            defer sub_result.deinit();
+                            if (sub_result.matched and sub_result.end == pos) {
                                 success = false;
                                 break;
                             }
@@ -2317,17 +2503,17 @@ pub const Vm = struct {
                     if (success) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(is_sub, stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertBackwardEnd => {
                     pc += 1;
                 },
-                .SubroutineCall => {
-                    if (inst.target.? != pc + 1) {
+                .SubroutineCall => |s| {
+                    if (s.target != pc + 1) {
                         try subroutine_stack.append(self.allocator, pc + 1);
                     }
-                    pc = inst.target.?;
+                    pc = s.target;
                 },
                 .SubroutineReturn => {
                     if (subroutine_stack.items.len > 0) {
@@ -2340,41 +2526,85 @@ pub const Vm = struct {
         }
 
         if (is_sub) {
-            // Sub-matches don't need to return captures
-            return MatchResult{
-                .matched = matched,
-                .captures = .empty,
-                .start = start_pos,
-                .end = match_end,
-                .allocator = self.allocator,
-            };
-        } else {
-            // Main match: clone captures for the caller
-            const owned_captures = try self.allocator.dupe(?usize, captures.items);
-            return MatchResult{
-                .matched = matched,
-                .captures = .{ .items = owned_captures, .capacity = owned_captures.len },
-                .start = if (captures.items[0]) |s| s else start_pos,
-                .end = match_end,
-                .allocator = self.allocator,
-            };
+            return MatchResult.sub(matched, start_pos, match_end, self.allocator);
         }
+        if (return_captures) {
+            const owned_captures = try self.allocator.dupe(?usize, captures.items);
+            return MatchResult.owned(matched, owned_captures, start_pos, match_end, self.allocator);
+        }
+        return MatchResult.borrow(matched, captures, start_pos, match_end, self.allocator);
     }
 
 
 
     pub fn match(self: *Vm, input: []const u8) !bool {
-        var result = try self.exec(input, 0);
+        var result = try self.execFast(input, 0);
         defer result.deinit();
         return result.matched;
     }
 
     pub fn find(self: *Vm, input: []const u8) !?MatchResult {
-        // If pattern starts with a fixed char, jump directly to matching positions
-        if (self.bytecode.first_char) |first| {
-            var start: usize = 0;
+        return try findFromInternal(self, input, 0, false);
+    }
+
+    pub fn exec(self: *Vm, input: []const u8, start_pos: usize) !MatchResult {
+        return execInternal(false, true, self, input, start_pos, 0, self.bytecode.instructions.items.len);
+    }
+
+    /// Fast exec that borrows the internal captures buffer.
+    /// Caller must not access captures after the next exec call on this Vm.
+    pub fn execFast(self: *Vm, input: []const u8, start_pos: usize) !MatchResult {
+        return execInternal(false, false, self, input, start_pos, 0, self.bytecode.instructions.items.len);
+    }
+
+    /// Clone a borrowed MatchResult into an owned one.
+    fn cloneResult(self: *Vm, result: MatchResult) !MatchResult {
+        const owned_captures = try self.allocator.dupe(?usize, result.captures.items);
+        return MatchResult{
+            .matched = result.matched,
+            .captures = .{ .items = owned_captures, .capacity = owned_captures.len },
+            .start = result.start,
+            .end = result.end,
+            .allocator = self.allocator,
+            .captures_owned = true,
+        };
+    }
+
+    /// Try matching at `start`; on success clone captures unless `fast`.
+    fn tryAt(self: *Vm, input: []const u8, start: usize, comptime fast: bool) !?MatchResult {
+        const result = try self.execFast(input, start);
+        if (!result.matched) return null;
+        if (fast) return result;
+        return try self.cloneResult(result);
+    }
+
+    /// Skip past UTF-8 continuation bytes (0x80-0xBF).
+    fn skipCont(input: []const u8, start: usize) usize {
+        var pos = start;
+        while (pos < input.len and input[pos] >= 0x80 and input[pos] <= 0xBF) {
+            pos += 1;
+        }
+        return pos;
+    }
+
+    fn findFromInternal(self: *Vm, input: []const u8, from_pos: usize, comptime fast: bool) !?MatchResult {
+        // Sunday algorithm: if pattern starts with a fixed string, use skip table
+        if (self.bytecode.has_skip_table) {
+            const prefix_len = self.bytecode.prefix_len;
+            const skip_table = self.bytecode.skip_table;
+            var start: usize = from_pos;
+            while (start + prefix_len <= input.len) {
+                if (try self.tryAt(input, start, fast)) |result| return result;
+                if (start + prefix_len >= input.len) break;
+                start += skip_table[input[start + prefix_len]];
+            }
+            return null;
+        }
+
+        const first_byte = self.bytecode.first_char orelse self.bytecode.first_byte;
+        if (first_byte) |first| {
+            var start: usize = from_pos;
             while (start <= input.len) {
-                // Find next position matching first_char
                 if (self.options.case_sensitive) {
                     if (std.mem.indexOfScalar(u8, input[start..], first)) |idx| {
                         start += idx;
@@ -2382,12 +2612,21 @@ pub const Vm = struct {
                         break;
                     }
                 } else {
-                    // Fast path: ASCII characters can use simple toLower comparison
                     if (first < 128) {
                         const first_lower = std.ascii.toLower(first);
-                        while (start < input.len and std.ascii.toLower(input[start]) != first_lower) {
-                            start += 1;
+                        const first_upper = std.ascii.toUpper(first);
+                        const needles = if (first_lower == first_upper)
+                            &[_]u8{first_lower}
+                        else
+                            &[_]u8{ first_lower, first_upper };
+                        while (start < input.len) {
+                            const slice = input[start..];
+                            const idx = std.mem.indexOfAny(u8, slice, needles) orelse break;
+                            start += idx;
+                            if (try self.tryAt(input, start, fast)) |result| return result;
+                            start = skipCont(input, start + 1);
                         }
+                        break;
                     } else {
                         while (start < input.len and !unicode_case.caseInsensitiveEqual(input[start], first)) {
                             start += 1;
@@ -2395,35 +2634,40 @@ pub const Vm = struct {
                     }
                 }
                 if (start > input.len) break;
-                
-                var result = try self.exec(input, start);
-                if (result.matched) {
-                    return result;
-                }
-                result.deinit();
-                start += 1;
+                if (try self.tryAt(input, start, fast)) |result| return result;
+                start = skipCont(input, start + 1);
             }
             return null;
         }
-        
-        // Anchored pattern: only try position 0
+
+        // Anchored pattern: only try from_pos
         if (self.bytecode.is_anchored) {
-            return try self.exec(input, 0);
+            if (from_pos != 0) return null;
+            return try self.tryAt(input, 0, fast);
         }
 
         // Generic path
-        for (0..input.len + 1) |start| {
-            var result = try self.exec(input, start);
-            if (result.matched) {
-                return result;
-            }
-            result.deinit();
+        var start: usize = from_pos;
+        while (start <= input.len) {
+            if (try self.tryAt(input, start, fast)) |result| return result;
+            start = skipCont(input, start + 1);
         }
         return null;
     }
 
-    pub fn exec(self: *Vm, input: []const u8, start_pos: usize) !MatchResult {
-        return execInternal(false, self, input, start_pos, 0, self.bytecode.instructions.items.len);
+    /// Find the first match starting from `from_pos`. Uses fast skipping when possible.
+    pub fn findFrom(self: *Vm, input: []const u8, from_pos: usize) !?MatchResult {
+        return findFromInternal(self, input, from_pos, false);
+    }
+
+    pub fn findFast(self: *Vm, input: []const u8) !?MatchResult {
+        return findFromInternal(self, input, 0, true);
+    }
+
+    /// Fast version of findFrom that borrows the internal captures buffer.
+    /// Caller must not access captures after the next exec/findFromFast call on this Vm.
+    pub fn findFromFast(self: *Vm, input: []const u8, from_pos: usize) !?MatchResult {
+        return findFromInternal(self, input, from_pos, true);
     }
 };
 

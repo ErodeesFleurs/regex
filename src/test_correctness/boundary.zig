@@ -1,5 +1,6 @@
 const std = @import("std");
 const regex = @import("../root.zig");
+const h = @import("helpers.zig");
 
 // Boundary and corner case tests.
 
@@ -167,11 +168,8 @@ test "boundary: unicode single char" {
 }
 
 test "boundary: case insensitive empty" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch(""));
-    try std.testing.expect(try re.isMatch("ABC"));
+    try h.expectMatchOpts("", "", .{ .case_sensitive = false });
+    try h.expectMatchOpts("", "ABC", .{ .case_sensitive = false });
 }
 
 test "boundary: dot with newline" {

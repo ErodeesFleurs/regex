@@ -1,22 +1,19 @@
 const std = @import("std");
 const regex = @import("../root.zig");
+const h = @import("helpers.zig");
 
 // RegexOptions correctness tests.
 
 test "options: case insensitive" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "hello", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("hello"));
-    try std.testing.expect(try re.isMatch("HELLO"));
-    try std.testing.expect(try re.isMatch("HeLLo"));
+    try h.expectMatchOpts("hello", "hello", .{ .case_sensitive = false });
+    try h.expectMatchOpts("hello", "HELLO", .{ .case_sensitive = false });
+    try h.expectMatchOpts("hello", "HeLLo", .{ .case_sensitive = false });
 }
 
 test "options: dot matches newline" {
     const allocator = std.testing.allocator;
     var re1 = try regex.Regex.compileWithOptions(allocator, ".*", .{ .dot_matches_newline = false });
     defer re1.deinit();
-    // Prefix match: ".*" matches empty string at position 0 regardless of newline handling.
     try std.testing.expect(try re1.isMatch("a\nb"));
 
     var re2 = try regex.Regex.compileWithOptions(allocator, ".*", .{ .dot_matches_newline = true });
@@ -32,7 +29,6 @@ test "options: multiline anchors" {
 
     var re2 = try regex.Regex.compileWithOptions(allocator, "^hello$", .{ .multiline = true });
     defer re2.deinit();
-    // Prefix match: isMatch only tries position 0; "x\nhello\ny" does not start with "hello".
     try std.testing.expect(!try re2.isMatch("x\nhello\ny"));
 
     var find_result = try re2.find("x\nhello\ny");
@@ -45,53 +41,37 @@ test "options: multiline anchors" {
 }
 
 test "options: case insensitive char class" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "[a-z]+", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("abc"));
-    try std.testing.expect(try re.isMatch("ABC"));
+    try h.expectMatchOpts("[a-z]+", "abc", .{ .case_sensitive = false });
+    try h.expectMatchOpts("[a-z]+", "ABC", .{ .case_sensitive = false });
 }
 
 test "options: case insensitive backref" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "(abc)\\1", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("abcabc"));
-    try std.testing.expect(try re.isMatch("abcABC"));
-    try std.testing.expect(try re.isMatch("ABCabc"));
+    try h.expectMatchOpts("(abc)\\1", "abcabc", .{ .case_sensitive = false });
+    try h.expectMatchOpts("(abc)\\1", "abcABC", .{ .case_sensitive = false });
+    try h.expectMatchOpts("(abc)\\1", "ABCabc", .{ .case_sensitive = false });
 }
 
 test "options: default is case sensitive" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try regex.isMatch(allocator, "hello", "hello"));
-    try std.testing.expect(!try regex.isMatch(allocator, "hello", "HELLO"));
+    try h.expectMatch("hello", "hello");
+    try h.expectNoMatch("hello", "HELLO");
 }
 
 test "options: unicode case insensitive literal" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "café", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("café"));
-    try std.testing.expect(try re.isMatch("CAFÉ"));
-    try std.testing.expect(try re.isMatch("CafÉ"));
+    try h.expectMatchOpts("café", "café", .{ .case_sensitive = false });
+    try h.expectMatchOpts("café", "CAFÉ", .{ .case_sensitive = false });
+    try h.expectMatchOpts("café", "CafÉ", .{ .case_sensitive = false });
 }
 
 test "options: unicode case insensitive greek" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "αβγ", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("αβγ"));
-    try std.testing.expect(try re.isMatch("ΑΒΓ"));
-    try std.testing.expect(try re.isMatch("ΑβΓ"));
+    try h.expectMatchOpts("αβγ", "αβγ", .{ .case_sensitive = false });
+    try h.expectMatchOpts("αβγ", "ΑΒΓ", .{ .case_sensitive = false });
+    try h.expectMatchOpts("αβγ", "ΑβΓ", .{ .case_sensitive = false });
 }
 
 test "options: unicode case insensitive cyrillic" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "привет", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("привет"));
-    try std.testing.expect(try re.isMatch("ПРИВЕТ"));
-    try std.testing.expect(try re.isMatch("ПриВет"));
+    try h.expectMatchOpts("привет", "привет", .{ .case_sensitive = false });
+    try h.expectMatchOpts("привет", "ПРИВЕТ", .{ .case_sensitive = false });
+    try h.expectMatchOpts("привет", "ПриВет", .{ .case_sensitive = false });
 }
 
 test "options: unicode case insensitive find" {
@@ -110,12 +90,9 @@ test "options: unicode case insensitive find" {
 }
 
 test "options: unicode case insensitive backref" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "(café)\\1", .{ .case_sensitive = false });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("cafécafé"));
-    try std.testing.expect(try re.isMatch("caféCAFÉ"));
-    try std.testing.expect(try re.isMatch("CAFÉcafé"));
+    try h.expectMatchOpts("(café)\\1", "cafécafé", .{ .case_sensitive = false });
+    try h.expectMatchOpts("(café)\\1", "caféCAFÉ", .{ .case_sensitive = false });
+    try h.expectMatchOpts("(café)\\1", "CAFÉcafé", .{ .case_sensitive = false });
 }
 
 test "options: global inline flag (?i)" {
@@ -174,17 +151,11 @@ test "options: combined global inline flag (?im)" {
 }
 
 test "options: free-spacing via RegexOptions" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "h e l l o", .{ .free_spacing = true });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("hello"));
+    try h.expectMatchOpts("h e l l o", "hello", .{ .free_spacing = true });
 }
 
 test "options: free-spacing with comment" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compileWithOptions(allocator, "hello # this is a comment\nworld", .{ .free_spacing = true });
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("helloworld"));
+    try h.expectMatchOpts("hello # this is a comment\nworld", "helloworld", .{ .free_spacing = true });
 }
 
 test "options: free-spacing preserves char class whitespace" {
@@ -198,17 +169,11 @@ test "options: free-spacing preserves char class whitespace" {
 }
 
 test "options: global inline flag (?x)" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compile(allocator, "(?x)h e l l o");
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("hello"));
+    try h.expectMatchOpts("(?x)h e l l o", "hello", .{});
 }
 
 test "options: global inline flag (?x) with comment" {
-    const allocator = std.testing.allocator;
-    var re = try regex.Regex.compile(allocator, "(?x)hello # match greeting\nworld");
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("helloworld"));
+    try h.expectMatchOpts("(?x)hello # match greeting\nworld", "helloworld", .{});
 }
 
 test "exec: match from position" {

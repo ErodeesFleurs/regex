@@ -5,6 +5,7 @@ const RegexOptions = @import("options.zig").RegexOptions;
 pub const OpCode = enum(u8) {
     // Basic instructions
     Char,          // match single character
+    String,        // match literal string
     Any,           // match any character
     CharClass,     // match character class
     
@@ -73,28 +74,54 @@ pub const OpCode = enum(u8) {
     NotVerticalWhitespace,
 };
 
-pub const Instruction = struct {
-    opcode: OpCode,
-    char: ?u8 = null,
-    char_codepoint: ?u21 = null, // for CharUtf8 instruction
-    char_class: ?*CharClass = null,
-    target: ?usize = null,
-    save_slot: ?usize = null,
-    backref_group: ?usize = null,
-    options: ?RegexOptions = null,
-    unicode_property: ?[]const u8 = null,
-    unicode_negated: bool = false,
-    subroutine_group: ?usize = null,
+pub const Instruction = union(OpCode) {
+    Char: u8,
+    String: []const u8,
+    Any: void,
+    CharClass: *CharClass,
+    Split: usize,
+    Jmp: usize,
+    Match: void,
+    Save: usize,
+    AssertStart: void,
+    AssertEnd: void,
+    AssertStringStart: void,
+    AssertStringEnd: void,
+    AssertStringEndAllowNewline: void,
+    AssertMatchStart: void,
+    AssertForward: void,
+    AssertForwardEnd: void,
+    AssertForwardNegative: void,
+    AssertBackward: ?usize, // fixed width, null = variable
+    AssertBackwardEnd: void,
+    AssertBackwardNegative: ?usize, // fixed width, null = variable
+    Backref: usize,
+    WordBoundary: void,
+    NotWordBoundary: void,
+    SetOption: RegexOptions,
+    AtomicStart: void,
+    AtomicEnd: void,
+    UnicodeProperty: struct { property: []const u8, negated: bool },
+    CharUtf8: u21,
+    GraphemeCluster: void,
+    Conditional: struct { group: usize, target: usize },
+    SubroutineCall: struct { group: usize, target: usize },
+    SubroutineReturn: void,
+    Newline: void,
+    ResetMatchStart: void,
+    NotNewline: void,
+    NotVerticalWhitespace: void,
 
     pub fn format(self: Instruction, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (self.opcode) {
-            .Char => try writer.print("Char({c})", .{self.char.?}),
+        switch (self) {
+            .Char => |ch| try writer.print("Char({c})", .{ch}),
+            .String => |s| try writer.print("String({s})", .{s}),
             .Any => try writer.print("Any", .{}),
             .CharClass => try writer.print("CharClass", .{}),
-            .Split => try writer.print("Split -> {}", .{self.target.?}),
-            .Jmp => try writer.print("Jmp -> {}", .{self.target.?}),
+            .Split => |target| try writer.print("Split -> {}", .{target}),
+            .Jmp => |target| try writer.print("Jmp -> {}", .{target}),
             .Match => try writer.print("Match", .{}),
-            .Save => try writer.print("Save({})", .{self.save_slot.?}),
+            .Save => |slot| try writer.print("Save({})", .{slot}),
             .AssertStart => try writer.print("AssertStart", .{}),
             .AssertEnd => try writer.print("AssertEnd", .{}),
             .AssertStringStart => try writer.print("AssertStringStart", .{}),
@@ -104,26 +131,28 @@ pub const Instruction = struct {
             .AssertForward => try writer.print("AssertForward", .{}),
             .AssertForwardEnd => try writer.print("AssertForwardEnd", .{}),
             .AssertForwardNegative => try writer.print("AssertForwardNegative", .{}),
-            .AssertBackward => try writer.print("AssertBackward", .{}),
+            .AssertBackward => |width| try writer.print("AssertBackward(width={?})", .{width}),
             .AssertBackwardEnd => try writer.print("AssertBackwardEnd", .{}),
-            .AssertBackwardNegative => try writer.print("AssertBackwardNegative", .{}),
-            .Backref => try writer.print("Backref({})", .{self.backref_group.?}),
+            .AssertBackwardNegative => |width| try writer.print("AssertBackwardNegative(width={?})", .{width}),
+            .Backref => |group| try writer.print("Backref({})", .{group}),
             .WordBoundary => try writer.print("WordBoundary", .{}),
             .NotWordBoundary => try writer.print("NotWordBoundary", .{}),
             .SetOption => try writer.print("SetOption", .{}),
             .AtomicStart => try writer.print("AtomicStart", .{}),
             .AtomicEnd => try writer.print("AtomicEnd", .{}),
-            .UnicodeProperty => try writer.print("UnicodeProperty({s}{s})", .{
-                if (self.unicode_negated) "P{" else "p{",
-                self.unicode_property.?, 
+            .UnicodeProperty => |p| try writer.print("UnicodeProperty({s}{s})", .{
+                if (p.negated) "P{" else "p{",
+                p.property, 
             }),
-            .Conditional => try writer.print("Conditional({}) -> {}", .{self.backref_group.?, self.target.?}),
-            .SubroutineCall => try writer.print("SubroutineCall({}) -> {}", .{self.subroutine_group.?, self.target.?}),
+            .Conditional => |c| try writer.print("Conditional({}) -> {}", .{c.group, c.target}),
+            .SubroutineCall => |s| try writer.print("SubroutineCall({}) -> {}", .{s.group, s.target}),
             .SubroutineReturn => try writer.print("SubroutineReturn", .{}),
             .Newline => try writer.print("Newline", .{}),
             .ResetMatchStart => try writer.print("ResetMatchStart", .{}),
             .NotNewline => try writer.print("NotNewline", .{}),
             .NotVerticalWhitespace => try writer.print("NotVerticalWhitespace", .{}),
+            .CharUtf8 => |cp| try writer.print("CharUtf8(U+{X:0>4})", .{cp}),
+            .GraphemeCluster => try writer.print("GraphemeCluster", .{}),
         }
     }
 };
@@ -132,9 +161,15 @@ pub const Bytecode = struct {
     instructions: std.ArrayList(Instruction),
     num_groups: usize,
     unicode_properties: std.ArrayList([]const u8),
+    strings: std.ArrayList([]const u8), // string pool for String opcode
     first_char: ?u8 = null, // first literal character, used for fast skipping in find()
+    first_byte: ?u8 = null, // first byte of CharUtf8 literal, used for fast skipping in find()
     assert_ends: std.ArrayList(usize), // indexed by PC, contains end PC for assert instructions
     is_anchored: bool = false, // true if pattern starts with ^ or \A
+    // Sunday skip table for fast skipping when pattern starts with a fixed string
+    skip_table: [256]u16 = undefined,
+    prefix_len: usize = 0,
+    has_skip_table: bool = false,
 
     allocator: std.mem.Allocator,
 
@@ -143,7 +178,9 @@ pub const Bytecode = struct {
             .instructions = .empty,
             .num_groups = 0,
             .unicode_properties = .empty,
+            .strings = .empty,
             .first_char = null,
+            .first_byte = null,
             .assert_ends = .empty,
             .is_anchored = false,
             .allocator = allocator,
@@ -155,6 +192,10 @@ pub const Bytecode = struct {
             self.allocator.free(prop);
         }
         self.unicode_properties.deinit(self.allocator);
+        for (self.strings.items) |s| {
+            self.allocator.free(s);
+        }
+        self.strings.deinit(self.allocator);
         self.instructions.deinit(self.allocator);
         self.assert_ends.deinit(self.allocator);
     }
@@ -166,7 +207,13 @@ pub const Bytecode = struct {
     }
     
     pub fn patch(self: *Bytecode, idx: usize, target: usize) void {
-        self.instructions.items[idx].target = target;
+        switch (self.instructions.items[idx]) {
+            .Split => |*t| t.* = target,
+            .Jmp => |*t| t.* = target,
+            .Conditional => |*c| c.target = target,
+            .SubroutineCall => |*s| s.target = target,
+            else => unreachable,
+        }
     }
     
     pub fn getPC(self: Bytecode) usize {
@@ -175,7 +222,7 @@ pub const Bytecode = struct {
     
     pub fn dump(self: Bytecode, writer: *std.Io.Writer) !void {
         for (self.instructions.items, 0..) |inst, i| {
-            try writer.print("{:4}: {f}\n", .{ i, inst });
+            try writer.print("{:3}: {s}\n", .{i, @tagName(inst)});
         }
     }
 };

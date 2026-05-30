@@ -58,18 +58,19 @@ pub const Regex = struct {
     }
 
     pub fn deinit(self: *Regex) void {
-        // Free char_class pointers in bytecode
         for (self.vm.bytecode.instructions.items) |inst| {
-            if (inst.char_class) |cc| {
-                cc.deinit(self.allocator);
-                self.allocator.destroy(cc);
+            switch (inst) {
+                .CharClass => |cc| {
+                    cc.deinit(self.allocator);
+                    self.allocator.destroy(cc);
+                },
+                else => {},
             }
         }
         for (self.group_names.items) |entry| {
             self.allocator.free(entry.name);
         }
         self.group_names.deinit(self.allocator);
-        self.vm.bytecode.deinit();
         self.vm.deinit();
     }
 
@@ -93,14 +94,25 @@ pub const Regex = struct {
         return try self.vm.match(text);
     }
 
-    pub fn find(self: *Regex, text: []const u8) !?MatchResult {
-        const result = try self.vm.find(text);
+    inline fn findBase(self: *Regex, text: []const u8, comptime fast: bool) !?MatchResult {
+        const result = if (fast) try self.vm.findFast(text) else try self.vm.find(text);
         if (result) |*r| {
             if (r.matched) {
                 self.vm.last_match_end = r.end;
             }
         }
         return result;
+    }
+
+    pub fn find(self: *Regex, text: []const u8) !?MatchResult {
+        return self.findBase(text, false);
+    }
+
+    /// Fast version of find that borrows the internal captures buffer.
+    /// Caller must not access the returned MatchResult after any subsequent
+    /// exec/find call on the same Regex.
+    pub fn findFast(self: *Regex, text: []const u8) !?MatchResult {
+        return self.findBase(text, true);
     }
     
     fn deinitMatchResults(results: *std.ArrayList(MatchResult)) void {
@@ -109,19 +121,30 @@ pub const Regex = struct {
         }
     }
 
-    pub fn findAll(self: *Regex, text: []const u8) !std.ArrayList(MatchResult) {
+    inline fn findAllBase(self: *Regex, text: []const u8, comptime fast: bool) !std.ArrayList(MatchResult) {
         var results: std.ArrayList(MatchResult) = .empty;
         errdefer {
             deinitMatchResults(&results);
             results.deinit(self.allocator);
         }
 
-        var iter = self.findIter(text);
+        var iter = if (fast) self.findIterFast(text) else self.findIter(text);
         while (try iter.next()) |result| {
             try results.append(self.allocator, result);
         }
 
         return results;
+    }
+
+    /// Fast version of findAll that borrows the internal captures buffer.
+    /// The returned MatchResults must not be accessed after any subsequent
+    /// exec/find call on the same Regex.
+    pub fn findAllFast(self: *Regex, text: []const u8) !std.ArrayList(MatchResult) {
+        return self.findAllBase(text, true);
+    }
+
+    pub fn findAll(self: *Regex, text: []const u8) !std.ArrayList(MatchResult) {
+        return self.findAllBase(text, false);
     }
 
     pub fn findIter(self: *Regex, text: []const u8) MatchIterator {
@@ -132,18 +155,32 @@ pub const Regex = struct {
         };
     }
 
+    /// Fast iterator that borrows the internal captures buffer.
+    /// The caller must not call any other exec/find method on the same Regex
+    /// between iterations, as that would invalidate the borrowed captures.
+    pub fn findIterFast(self: *Regex, text: []const u8) MatchIteratorFast {
+        return MatchIteratorFast{
+            .regex = self,
+            .text = text,
+            .pos = 0,
+        };
+    }
+
     pub fn matchAll(self: *Regex, text: []const u8) !std.ArrayList([]const u8) {
         var results: std.ArrayList([]const u8) = .empty;
         errdefer results.deinit(self.allocator);
 
-        var iter = self.findIter(text);
-        while (true) {
-            var result = try iter.next();
-            if (result) |*r| {
-                try results.append(self.allocator, text[r.start..r.end]);
-                r.deinit();
+        var pos: usize = 0;
+        while (pos <= text.len) {
+            const mr = try self.vm.findFromFast(text, pos) orelse break;
+            // mr uses borrowed captures — safe to read start/end here
+            const start = mr.start;
+            const end = mr.end;
+            try results.append(self.allocator, text[start..end]);
+            if (start == end) {
+                pos += 1;
             } else {
-                break;
+                pos = end;
             }
         }
 
@@ -264,6 +301,12 @@ pub const Regex = struct {
         return self.replaceLimit(text, replacement, null);
     }
 
+    fn appendMatchPrefix(result: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, last_end: usize, match_start: usize) !void {
+        if (match_start > last_end) {
+            try result.appendSlice(allocator, text[last_end..match_start]);
+        }
+    }
+
     fn replaceLimit(self: *Regex, text: []const u8, replacement: []const u8, limit: ?usize) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(self.allocator);
@@ -272,16 +315,28 @@ pub const Regex = struct {
         var count: usize = 0;
         const max_replacements = if (limit) |l| l else std.math.maxInt(usize);
 
-        var iter = self.findIter(text);
-        while (count < max_replacements) {
-            var mr = (try iter.next()) orelse break;
-            defer mr.deinit();
-            if (mr.start > last_end) {
-                try result.appendSlice(self.allocator, text[last_end..mr.start]);
+        const needs_captures = std.mem.indexOfScalar(u8, replacement, '$') != null;
+
+        if (!needs_captures) {
+            var pos: usize = 0;
+            while (count < max_replacements and pos <= text.len) {
+                const mr = try self.vm.findFromFast(text, pos) orelse break;
+                try appendMatchPrefix(&result, self.allocator, text, last_end, mr.start);
+                try result.appendSlice(self.allocator, replacement);
+                last_end = mr.end;
+                pos = if (mr.start == mr.end) last_end + 1 else last_end;
+                count += 1;
             }
-            try self.appendReplacement(&result, text, mr, replacement);
-            last_end = mr.end;
-            count += 1;
+        } else {
+            var iter = self.findIter(text);
+            while (count < max_replacements) {
+                var mr = (try iter.next()) orelse break;
+                defer mr.deinit();
+                try appendMatchPrefix(&result, self.allocator, text, last_end, mr.start);
+                try self.appendReplacement(&result, text, mr, replacement);
+                last_end = mr.end;
+                count += 1;
+            }
         }
 
         if (last_end < text.len) {
@@ -300,9 +355,7 @@ pub const Regex = struct {
         while (try iter.next()) |match_result| {
             var mr = match_result;
             defer mr.deinit();
-            if (mr.start > last_end) {
-                try result.appendSlice(self.allocator, text[last_end..mr.start]);
-            }
+            try appendMatchPrefix(&result, self.allocator, text, last_end, mr.start);
             const match_text = text[mr.start..mr.end];
             const repl_text = replFn(match_text, mr);
             try result.appendSlice(self.allocator, repl_text);
@@ -328,14 +381,17 @@ pub const Regex = struct {
         var count: usize = 0;
         const max_splits = if (limit) |l| l else std.math.maxInt(usize);
 
-        var iter = self.findIter(text);
+        var search_pos: usize = 0;
         while (count < max_splits) {
-            var mr = (try iter.next()) orelse break;
-            defer mr.deinit();
-
+            const mr = try self.vm.findFromFast(text, search_pos) orelse break;
             try results.append(self.allocator, text[last_end..mr.start]);
             count += 1;
             last_end = mr.end;
+            search_pos = mr.end;
+            if (mr.start == mr.end) {
+                search_pos += 1;
+                if (search_pos > text.len) break;
+            }
         }
 
         try results.append(self.allocator, text[last_end..]);
@@ -343,30 +399,42 @@ pub const Regex = struct {
     }
 };
 
-pub const MatchIterator = struct {
-    regex: *Regex,
-    text: []const u8,
-    pos: usize,
+pub fn MatchIteratorBase(comptime fast: bool) type {
+    return struct {
+        regex: *Regex,
+        text: []const u8,
+        pos: usize,
 
-    pub fn next(self: *MatchIterator) !?MatchResult {
-        while (self.pos <= self.text.len) {
-            var result = try self.regex.vm.exec(self.text, self.pos);
-            if (result.matched) {
-                self.regex.vm.last_match_end = result.end;
-                if (result.start == result.end) {
-                    self.pos += 1;
+        pub fn next(self: *@This()) !?MatchResult {
+            while (self.pos <= self.text.len) {
+                var result = if (fast)
+                    try self.regex.vm.findFromFast(self.text, self.pos)
+                else
+                    try self.regex.vm.findFrom(self.text, self.pos);
+                if (result) |*r| {
+                    self.regex.vm.last_match_end = r.end;
+                    if (r.start == r.end) {
+                        // For zero-width matches, advance past the match position to avoid infinite loops
+                        self.pos = r.end + 1;
+                    } else {
+                        self.pos = r.end;
+                    }
+                    return result;
                 } else {
-                    self.pos = result.end;
+                    return null;
                 }
-                return result;
-            } else {
-                result.deinit();
-                self.pos += 1;
             }
+            return null;
         }
-        return null;
-    }
-};
+    };
+}
+
+pub const MatchIterator = MatchIteratorBase(false);
+
+/// Fast iterator that borrows the internal captures buffer.
+/// The caller must not call any other exec/find method on the same Regex
+/// between iterations, as that would invalidate the borrowed captures.
+pub const MatchIteratorFast = MatchIteratorBase(true);
 
 test "regex basic" {
     const allocator = std.testing.allocator;

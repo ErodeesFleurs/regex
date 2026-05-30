@@ -123,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
     if (opts.debug) {
         try stdout_writer.print("Bytecode:\n", .{});
         for (regex.vm.bytecode.instructions.items, 0..) |inst, i| {
-            try stdout_writer.print("{:4}: {s}\n", .{ i, @tagName(inst.opcode) });
+            try stdout_writer.print("{:4}: {s}\n", .{ i, @tagName(inst) });
         }
         try stdout_writer.print("\n", .{});
     }
@@ -182,6 +182,3 @@ pub fn main(init: std.process.Init) !void {
     try stdout_writer.flush();
 }
 
-test "main test" {
-    // Integration tests can be added here
-}

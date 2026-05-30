@@ -118,6 +118,9 @@ pub const CharClass = struct {
     has_unicode_ranges: bool = false,
     has_unicode_props: bool = false,
 
+    ascii_bitmap: [32]u8 = .{0} ** 32,
+    has_ascii_bitmap: bool = false,
+
     pub fn init(allocator: std.mem.Allocator, negated: bool) CharClass {
         return .{
             .ranges = .empty,
@@ -129,6 +132,8 @@ pub const CharClass = struct {
             .has_ranges_or_posix = false,
             .has_unicode_ranges = false,
             .has_unicode_props = false,
+            .ascii_bitmap = .{0} ** 32,
+            .has_ascii_bitmap = false,
         };
     }
 
@@ -149,6 +154,13 @@ pub const CharClass = struct {
     pub fn addRange(self: *CharClass, start: u8, end: u8) !void {
         try self.ranges.append(self.allocator, .{ .start = start, .end = end });
         self.has_ranges_or_posix = true;
+        if (end < 128) {
+            self.has_ascii_bitmap = true;
+            var i: usize = start;
+            while (i <= end) : (i += 1) {
+                self.ascii_bitmap[i >> 3] |= @as(u8, 1) << @truncate(i & 7);
+            }
+        }
     }
 
     pub fn addUnicodeRange(self: *CharClass, start: u21, end: u21) !void {
@@ -160,6 +172,52 @@ pub const CharClass = struct {
         const copy = try self.allocator.dupe(u8, name);
         try self.posix_classes.append(self.allocator, copy);
         self.has_ranges_or_posix = true;
+    }
+
+    pub fn addShorthandClass(self: *CharClass, shorthand: u8) !void {
+        switch (shorthand) {
+            'd' => try self.addRange('0', '9'),
+            'D' => {
+                try self.addRange(0, '/' - 1);
+                try self.addRange(':' , 255);
+            },
+            'w' => {
+                try self.addRange('a', 'z');
+                try self.addRange('A', 'Z');
+                try self.addRange('0', '9');
+                try self.addRange('_', '_');
+            },
+            'W' => {
+                try self.addRange(0, '0' - 1);
+                try self.addRange('9' + 1, 'A' - 1);
+                try self.addRange('Z' + 1, '_' - 1);
+                try self.addRange('_' + 1, 'a' - 1);
+                try self.addRange('z' + 1, 255);
+            },
+            's' => {
+                try self.addRange('\t', '\t');
+                try self.addRange(' ', ' ');
+                try self.addRange('\n', '\n');
+                try self.addRange('\r', '\r');
+            },
+            'S' => {
+                try self.addRange(0, '\t' - 1);
+                try self.addRange('\t' + 1, '\n' - 1);
+                try self.addRange('\n' + 1, '\r' - 1);
+                try self.addRange('\r' + 1, ' ' - 1);
+                try self.addRange(' ' + 1, 255);
+            },
+            'h' => {
+                try self.addRange('\t', '\t');
+                try self.addRange(' ', ' ');
+            },
+            'H' => {
+                try self.addRange(0, '\t' - 1);
+                try self.addRange('\t' + 1, ' ' - 1);
+                try self.addRange(' ' + 1, 255);
+            },
+            else => unreachable,
+        }
     }
 
     pub fn addUnicodeProperty(self: *CharClass, name: []const u8, negated_prop: bool) !void {
@@ -410,6 +468,21 @@ pub const Parser = struct {
         return left;
     }
 
+    fn makeQuantifierNode(self: *Parser, primary: *AstNode, base: NodeType, lazy: NodeType, possessive: NodeType) !*AstNode {
+        const next = self.tokenizer.peek().type;
+        const node = try self.allocator.create(AstNode);
+        if (next == .Question) {
+            _ = self.tokenizer.nextToken();
+            node.* = .{ .type = lazy, .left = primary };
+        } else if (next == .Plus) {
+            _ = self.tokenizer.nextToken();
+            node.* = .{ .type = possessive, .left = primary };
+        } else {
+            node.* = .{ .type = base, .left = primary };
+        }
+        return node;
+    }
+
     // factor = primary quantifier?
     fn parseFactor(self: *Parser) ParserError!?*AstNode {
         const primary = try self.parsePrimary() orelse return null;
@@ -422,48 +495,15 @@ pub const Parser = struct {
         switch (token.type) {
             .Star => {
                 _ = self.tokenizer.nextToken();
-                const next = self.tokenizer.peek().type;
-                const node = try self.allocator.create(AstNode);
-                if (next == .Question) {
-                    _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .LazyStar, .left = primary };
-                } else if (next == .Plus) {
-                    _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .PossessiveStar, .left = primary };
-                } else {
-                    node.* = .{ .type = .Star, .left = primary };
-                }
-                return node;
+                return try self.makeQuantifierNode(primary, .Star, .LazyStar, .PossessiveStar);
             },
             .Plus => {
                 _ = self.tokenizer.nextToken();
-                const next = self.tokenizer.peek().type;
-                const node = try self.allocator.create(AstNode);
-                if (next == .Question) {
-                    _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .LazyPlus, .left = primary };
-                } else if (next == .Plus) {
-                    _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .PossessivePlus, .left = primary };
-                } else {
-                    node.* = .{ .type = .Plus, .left = primary };
-                }
-                return node;
+                return try self.makeQuantifierNode(primary, .Plus, .LazyPlus, .PossessivePlus);
             },
             .Question => {
                 _ = self.tokenizer.nextToken();
-                const next = self.tokenizer.peek().type;
-                const node = try self.allocator.create(AstNode);
-                if (next == .Question) {
-                    _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .LazyQuestion, .left = primary };
-                } else if (next == .Plus) {
-                    _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .PossessiveQuestion, .left = primary };
-                } else {
-                    node.* = .{ .type = .Question, .left = primary };
-                }
-                return node;
+                return try self.makeQuantifierNode(primary, .Question, .LazyQuestion, .PossessiveQuestion);
             },
             .LBrace => {
                 const qnode = try self.parseQuantifier(primary);
@@ -569,6 +609,125 @@ pub const Parser = struct {
         return node;
     }
 
+    fn parseEscapeValue(token_value: []const u8) usize {
+        if (token_value.len >= 2 and token_value[0] == '\\') {
+            return switch (token_value[1]) {
+                't' => '\t',
+                'n' => '\n',
+                'r' => '\r',
+                'a' => '\x07',
+                'e' => '\x1B',
+                'f' => '\x0C',
+                'v' => '\x0B',
+                '\\' => '\\',
+                'x' => blk: {
+                    if (token_value.len >= 4 and token_value[2] == '{') {
+                        const hex = token_value[3 .. token_value.len - 1];
+                        break :blk std.fmt.parseInt(u21, hex, 16) catch token_value[1];
+                    } else {
+                        const hex = token_value[2..];
+                        break :blk std.fmt.parseInt(u8, hex, 16) catch token_value[1];
+                    }
+                },
+                'u' => blk: {
+                    const hex = token_value[2..];
+                    break :blk std.fmt.parseInt(u16, hex, 16) catch token_value[1];
+                },
+                'c' => blk: {
+                    if (token_value.len >= 3) {
+                        const ctrl_ch = token_value[2];
+                        break :blk ctrl_ch & 0x1F;
+                    }
+                    break :blk 0;
+                },
+                '0' => 0,
+                'o' => blk: {
+                    if (token_value.len >= 4 and token_value[2] == '{') {
+                        const oct = token_value[3 .. token_value.len - 1];
+                        break :blk std.fmt.parseInt(u21, oct, 8) catch token_value[1];
+                    }
+                    break :blk token_value[1];
+                },
+                'N' => blk: {
+                    if (token_value.len >= 6 and token_value[2] == '{' and token_value[3] == 'U' and token_value[4] == '+') {
+                        const hex = token_value[5 .. token_value.len - 1];
+                        break :blk std.fmt.parseInt(u21, hex, 16) catch token_value[1];
+                    }
+                    break :blk token_value[1];
+                },
+                else => token_value[1],
+            };
+        } else {
+            if (token_value.len == 1) {
+                return token_value[0];
+            } else {
+                return std.unicode.utf8Decode(token_value) catch token_value[0];
+            }
+        }
+    }
+
+    fn parseNamedBackrefValue(self: *Parser, token: Token) ParserError!usize {
+        if (std.mem.indexOf(u8, token.value, "<")) |name_start| {
+            if (std.mem.lastIndexOf(u8, token.value, ">")) |name_end| {
+                const ref = token.value[name_start + 1 .. name_end];
+                return self.group_names.get(ref) orelse {
+                    self.setErrorAtToken("Unknown named capture group", token);
+                    return error.InvalidBackref;
+                };
+            } else {
+                self.setErrorAtToken("Invalid named backreference syntax", token);
+                return error.InvalidBackref;
+            }
+        } else if (std.mem.indexOf(u8, token.value, "{")) |brace_start| {
+            if (std.mem.lastIndexOf(u8, token.value, "}")) |brace_end| {
+                const ref = token.value[brace_start + 1 .. brace_end];
+                if (ref.len >= 2 and (ref[0] == '-' or ref[0] == '+')) {
+                    const rel = std.fmt.parseInt(isize, ref, 10) catch {
+                        self.setErrorAtToken("Invalid relative backreference", token);
+                        return error.InvalidBackref;
+                    };
+                    if (rel < 0) {
+                        return if (self.group_counter >= @abs(rel)) self.group_counter - @abs(rel) + 1 else 0;
+                    } else {
+                        return self.group_counter + @abs(rel);
+                    }
+                } else if (std.fmt.parseInt(usize, ref, 10)) |n| {
+                    return n;
+                } else |_| {
+                    return self.group_names.get(ref) orelse {
+                        self.setErrorAtToken("Unknown named capture group", token);
+                        return error.InvalidBackref;
+                    };
+                }
+            } else {
+                self.setErrorAtToken("Invalid named backreference syntax", token);
+                return error.InvalidBackref;
+            }
+        } else {
+            self.setErrorAtToken("Invalid named backreference syntax", token);
+            return error.InvalidBackref;
+        }
+    }
+
+    fn createShorthandCharClassNode(self: *Parser, token_type: TokenType) !*AstNode {
+        const node = try self.allocator.create(AstNode);
+        const negated = switch (token_type) {
+            .NotDigit, .NotWord, .NotWhitespace, .NotHorizontalWhitespace => true,
+            else => false,
+        };
+        var cc = CharClass.init(self.allocator, negated);
+        const shorthand: u8 = switch (token_type) {
+            .Digit, .NotDigit => 'd',
+            .Word, .NotWord => 'w',
+            .Whitespace, .NotWhitespace => 's',
+            .HorizontalWhitespace, .NotHorizontalWhitespace => 'h',
+            else => unreachable,
+        };
+        try cc.addShorthandClass(shorthand);
+        node.* = .{ .type = .CharClass, .char_class = cc };
+        return node;
+    }
+
     // primary = literal | '.' | '(' expression ')' | '[' char_class ']'
     fn parsePrimary(self: *Parser) ParserError!?*AstNode {
         const token = self.tokenizer.peek();
@@ -577,168 +736,37 @@ pub const Parser = struct {
             .Literal => {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
-
-                // Process escape sequence value
-                var value: usize = undefined;
-                if (token.value.len >= 2 and token.value[0] == '\\') {
-                    value = switch (token.value[1]) {
-                        't' => '\t',
-                        'n' => '\n',
-                        'r' => '\r',
-                        'a' => '\x07',
-                        'e' => '\x1B',
-                        'f' => '\x0C',
-                        'v' => '\x0B',
-                        '\\' => '\\',
-                        'x' => blk: {
-                            if (token.value.len >= 4 and token.value[2] == '{') {
-                                // \x{hhhh} - variable-length hex
-                                const hex = token.value[3 .. token.value.len - 1];
-                                break :blk std.fmt.parseInt(u21, hex, 16) catch token.value[1];
-                            } else {
-                                // \xNN - two-digit hex
-                                const hex = token.value[2..];
-                                break :blk std.fmt.parseInt(u8, hex, 16) catch token.value[1];
-                            }
-                        },
-                        'u' => blk: {
-                            // \uNNNN - four-digit hex
-                            const hex = token.value[2..];
-                            break :blk std.fmt.parseInt(u16, hex, 16) catch token.value[1];
-                        },
-                        'c' => blk: {
-                            // \cX - control character
-                            if (token.value.len >= 3) {
-                                const ctrl_ch = token.value[2];
-                                break :blk ctrl_ch & 0x1F;
-                            }
-                            break :blk 0;
-                        },
-                        '0' => 0,
-                        'o' => blk: {
-                            // \o{NNN} - octal escape
-                            if (token.value.len >= 4 and token.value[2] == '{') {
-                                const oct = token.value[3 .. token.value.len - 1];
-                                break :blk std.fmt.parseInt(u21, oct, 8) catch token.value[1];
-                            }
-                            break :blk token.value[1];
-                        },
-                        'N' => blk: {
-                            // \N{U+HHHH} - Unicode code point
-                            if (token.value.len >= 6 and token.value[2] == '{' and token.value[3] == 'U' and token.value[4] == '+') {
-                                const hex = token.value[5 .. token.value.len - 1];
-                                break :blk std.fmt.parseInt(u21, hex, 16) catch token.value[1];
-                            }
-                            break :blk token.value[1];
-                        },
-                        else => token.value[1],
-                    };
-                } else {
-                    if (token.value.len == 1) {
-                        value = token.value[0];
-                    } else {
-                        // Multi-byte UTF-8 character
-                        value = std.unicode.utf8Decode(token.value) catch token.value[0];
-                    }
-                }
-
                 node.* = .{
                     .type = .Literal,
-                    .value = @intCast(value),
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
+                    .value = @intCast(parseEscapeValue(token.value)),
                 };
                 return node;
             },
             .Dot => {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .Any,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
+                node.* = .{ .type = .Any };
                 return node;
             },
             .Digit, .NotDigit, .Word, .NotWord, .Whitespace, .NotWhitespace, .HorizontalWhitespace, .NotHorizontalWhitespace => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                const negated = switch (token.type) {
-                    .NotDigit, .NotWord, .NotWhitespace, .NotHorizontalWhitespace => true,
-                    else => false,
-                };
-                var cc = CharClass.init(self.allocator, negated);
-
-                switch (token.type) {
-                    .Digit, .NotDigit => try cc.addRange('0', '9'),
-                    .Word, .NotWord => {
-                        try cc.addRange('a', 'z');
-                        try cc.addRange('A', 'Z');
-                        try cc.addRange('0', '9');
-                        try cc.addRange('_', '_');
-                    },
-                    .Whitespace, .NotWhitespace => {
-                        try cc.addRange('\t', '\t');
-                        try cc.addRange(' ', ' ');
-                        try cc.addRange('\n', '\n');
-                        try cc.addRange('\r', '\r');
-                    },
-                    .HorizontalWhitespace, .NotHorizontalWhitespace => {
-                        try cc.addRange('\t', '\t');
-                        try cc.addRange(' ', ' ');
-                    },
-                    else => unreachable,
-                }
-
-                node.* = .{
-                    .type = .CharClass,
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = cc,
-                    .group_index = null,
-                };
-                return node;
+                return try self.createShorthandCharClassNode(token.type);
             },
             .WordBoundary, .NotWordBoundary => {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
-                    .type = switch (token.type) {
-                        .WordBoundary => .WordBoundary,
-                        .NotWordBoundary => .NotWordBoundary,
-                        else => unreachable,
-                    },
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
+                    .type = if (token.type == .WordBoundary) .WordBoundary else .NotWordBoundary,
                 };
                 return node;
             },
             .UnicodeProperty, .NotUnicodeProperty => {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
-                // Extract property name: \p{prop} or \P{prop}
-                const prop_name = token.value[3..token.value.len - 1]; // skip \p{ and }
+                const prop_name = token.value[3 .. token.value.len - 1];
                 const prop_copy = try self.allocator.dupe(u8, prop_name);
                 node.* = .{
-                    .type = switch (token.type) {
-                        .UnicodeProperty => .UnicodeProperty,
-                        .NotUnicodeProperty => .NotUnicodeProperty,
-                        else => unreachable,
-                    },
-                    .value = null,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
+                    .type = if (token.type == .UnicodeProperty) .UnicodeProperty else .NotUnicodeProperty,
                     .unicode_property = prop_copy,
                     .unicode_negated = token.type == .NotUnicodeProperty,
                 };
@@ -757,73 +785,16 @@ pub const Parser = struct {
                 node.* = .{
                     .type = .Backref,
                     .value = group_idx,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
                 };
                 return node;
             },
             .NamedBackref => {
                 _ = self.tokenizer.nextToken();
-                // token.value is like "\g<name>", "\k<name>", "\g{-1}", "\g{+1}", "\g{name}"
-                // Determine delimiter: <...> or {...}
-                var group_idx: usize = 0;
-
-                if (std.mem.indexOf(u8, token.value, "<")) |name_start| {
-                    if (std.mem.lastIndexOf(u8, token.value, ">")) |name_end| {
-                        const ref = token.value[name_start + 1 .. name_end];
-                        group_idx = self.group_names.get(ref) orelse {
-                            self.setErrorAtToken("Unknown named capture group", token);
-                            return error.InvalidBackref;
-                        };
-                    } else {
-                        self.setErrorAtToken("Invalid named backreference syntax", token);
-                        return error.InvalidBackref;
-                    }
-                } else if (std.mem.indexOf(u8, token.value, "{")) |brace_start| {
-                    if (std.mem.lastIndexOf(u8, token.value, "}")) |brace_end| {
-                        const ref = token.value[brace_start + 1 .. brace_end];
-                        // Check for relative reference: \g{-N} or \g{+N}
-                        if (ref.len >= 2 and (ref[0] == '-' or ref[0] == '+')) {
-                            const rel = std.fmt.parseInt(isize, ref, 10) catch {
-                                self.setErrorAtToken("Invalid relative backreference", token);
-                                return error.InvalidBackref;
-                            };
-                            if (rel < 0) {
-                                // \g{-1} refers to the last defined group
-                                group_idx = if (self.group_counter >= @abs(rel)) self.group_counter - @abs(rel) + 1 else 0;
-                            } else {
-                                // \g{+1} refers to the next group to be defined (forward reference)
-                                group_idx = self.group_counter + @abs(rel);
-                            }
-                        } else if (std.fmt.parseInt(usize, ref, 10)) |n| {
-                            // Numeric absolute reference: \g{1}
-                            group_idx = n;
-                        } else |_| {
-                            // Named reference in braces: \g{name}
-                            group_idx = self.group_names.get(ref) orelse {
-                                self.setErrorAtToken("Unknown named capture group", token);
-                                return error.InvalidBackref;
-                            };
-                        }
-                    } else {
-                        self.setErrorAtToken("Invalid named backreference syntax", token);
-                        return error.InvalidBackref;
-                    }
-                } else {
-                    self.setErrorAtToken("Invalid named backreference syntax", token);
-                    return error.InvalidBackref;
-                }
-
+                const group_idx = try self.parseNamedBackrefValue(token);
                 const node = try self.allocator.create(AstNode);
                 node.* = .{
                     .type = .Backref,
                     .value = group_idx,
-                    .left = null,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
                 };
                 return node;
             },
@@ -956,61 +927,11 @@ pub const Parser = struct {
 
             // Process shorthand escape sequences inside char class (\d, \w, \s, etc.)
             if (t.value.len == 2 and t.value[0] == '\\') {
-                const shorthand_handled = switch (t.value[1]) {
-                    'd' => blk: {
-                        try cc.addRange('0', '9');
-                        break :blk true;
-                    },
-                    'D' => blk: {
-                        try cc.addRange(0, '/' - 1);
-                        try cc.addRange(':' , 255);
-                        break :blk true;
-                    },
-                    'w' => blk: {
-                        try cc.addRange('a', 'z');
-                        try cc.addRange('A', 'Z');
-                        try cc.addRange('0', '9');
-                        try cc.addRange('_', '_');
-                        break :blk true;
-                    },
-                    'W' => blk: {
-                        try cc.addRange(0, '0' - 1);
-                        try cc.addRange('9' + 1, 'A' - 1);
-                        try cc.addRange('Z' + 1, '_' - 1);
-                        try cc.addRange('_' + 1, 'a' - 1);
-                        try cc.addRange('z' + 1, 255);
-                        break :blk true;
-                    },
-                    's' => blk: {
-                        try cc.addRange('\t', '\t');
-                        try cc.addRange(' ', ' ');
-                        try cc.addRange('\n', '\n');
-                        try cc.addRange('\r', '\r');
-                        break :blk true;
-                    },
-                    'S' => blk: {
-                        try cc.addRange(0, '\t' - 1);
-                        try cc.addRange('\t' + 1, '\n' - 1);
-                        try cc.addRange('\n' + 1, '\r' - 1);
-                        try cc.addRange('\r' + 1, ' ' - 1);
-                        try cc.addRange(' ' + 1, 255);
-                        break :blk true;
-                    },
-                    'h' => blk: {
-                        try cc.addRange('\t', '\t');
-                        try cc.addRange(' ', ' ');
-                        break :blk true;
-                    },
-                    'H' => blk: {
-                        try cc.addRange(0, '\t' - 1);
-                        try cc.addRange('\t' + 1, ' ' - 1);
-                        try cc.addRange(' ' + 1, 255);
-                        break :blk true;
-                    },
-                    else => false,
-                };
-                if (shorthand_handled) {
-                    // shorthand handled, skip range check
+                const ch = t.value[1];
+                if (ch == 'd' or ch == 'D' or ch == 'w' or ch == 'W' or
+                    ch == 's' or ch == 'S' or ch == 'h' or ch == 'H')
+                {
+                    try cc.addShorthandClass(ch);
                     continue;
                 }
             }
@@ -1168,14 +1089,7 @@ pub const Parser = struct {
                     return error.UnexpectedToken;
                 };
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .Group,
-                    .value = null,
-                    .left = inner,
-                    .right = null,
-                    .char_class = null,
-                    .group_index = null,
-                };
+                node.* = .{ .type = .Group, .left = inner };
                 return node;
             }
 
@@ -1270,11 +1184,7 @@ pub const Parser = struct {
                     const assert_node = try self.allocator.create(AstNode);
                     assert_node.* = .{
                         .type = if (look_ch == '=') .AssertForward else .AssertForwardNegative,
-                        .value = null,
                         .left = inner,
-                        .right = null,
-                        .char_class = null,
-                        .group_index = null,
                     };
                     cond_node = assert_node;
                 } else if (look_ch == '<') {
@@ -1295,11 +1205,7 @@ pub const Parser = struct {
                             const assert_node = try self.allocator.create(AstNode);
                             assert_node.* = .{
                                 .type = if (lt_ch == '=') .AssertBackward else .AssertBackwardNegative,
-                                .value = null,
                                 .left = inner,
-                                .right = null,
-                                .char_class = null,
-                                .group_index = null,
                             };
                             cond_node = assert_node;
                         }
@@ -1364,8 +1270,6 @@ pub const Parser = struct {
             .value = if (is_group_condition) group_idx else null,
             .left = yes_branch,
             .right = no_branch,
-            .char_class = null,
-            .group_index = null,
             .condition = cond_node,
         };
         return node;
@@ -1429,9 +1333,6 @@ pub const Parser = struct {
                 .type = .InlineFlag,
                 .value = flag_bits,
                 .left = inner,
-                .right = null,
-                .char_class = null,
-                .group_index = null,
                 .options = opts,
             };
             return node;
@@ -1445,10 +1346,6 @@ pub const Parser = struct {
             node.* = .{
                 .type = .InlineFlag,
                 .value = flag_bits,
-                .left = null,
-                .right = null,
-                .char_class = null,
-                .group_index = null,
                 .options = opts,
             };
             return node;
@@ -1508,10 +1405,6 @@ pub const Parser = struct {
             node.* = .{
                 .type = .SubroutineCall,
                 .value = subroutine_group,
-                .left = null,
-                .right = null,
-                .char_class = null,
-                .group_index = null,
             };
             return node;
         }
@@ -1565,10 +1458,7 @@ pub const Parser = struct {
         const node = try self.allocator.create(AstNode);
         node.* = .{
             .type = .Group,
-            .value = null,
             .left = inner,
-            .right = null,
-            .char_class = null,
             .group_index = group_index,
             .group_name = name,
         };

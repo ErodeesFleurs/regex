@@ -43,7 +43,7 @@ fn runBenchmark(allocator: std.mem.Allocator, b: Benchmark, writer: *Io.Writer) 
     // Measure compile time
     const compile_start = getMonotonicNs();
     var re = try regex.compile(allocator, b.pattern);
-    const compile_ns = getMonotonicNs() - compile_start;
+    _ = getMonotonicNs() - compile_start;
     defer re.deinit();
 
     // Measure match time
@@ -56,18 +56,59 @@ fn runBenchmark(allocator: std.mem.Allocator, b: Benchmark, writer: *Io.Writer) 
 
     // Measure find time
     const find_start = getMonotonicNs();
+    var find_total: usize = 0;
     for (0..b.iterations) |_| {
         var result = try re.find(b.text);
-        if (result) |*r| r.deinit();
+        if (result) |*r| {
+            find_total += @intFromBool(r.matched);
+            r.deinit();
+        }
     }
     const total_find_ns = getMonotonicNs() - find_start;
     const avg_find_ns = @divFloor(total_find_ns, b.iterations);
 
-    try writer.print("{s:30} | compile: {d:>8} us | isMatch: {d:>6} ns | find: {d:>6} ns\n", .{
+    // Measure findFast time
+    const find_fast_start = getMonotonicNs();
+    var find_fast_total: usize = 0;
+    for (0..b.iterations) |_| {
+        var result = try re.findFast(b.text);
+        if (result) |*r| {
+            find_fast_total += @intFromBool(r.matched);
+            r.deinit();
+        }
+    }
+    const total_find_fast_ns = getMonotonicNs() - find_fast_start;
+    const avg_find_fast_ns = @divFloor(total_find_fast_ns, b.iterations);
+
+    // Measure execFast time (for comparison)
+    const exec_fast_start = getMonotonicNs();
+    var exec_fast_total: usize = 0;
+    for (0..b.iterations) |_| {
+        var result = try re.vm.execFast(b.text, 0);
+        exec_fast_total += @intFromBool(result.matched);
+        result.deinit();
+    }
+    const total_exec_fast_ns = getMonotonicNs() - exec_fast_start;
+    const avg_exec_fast_ns = @divFloor(total_exec_fast_ns, b.iterations);
+
+    // Measure exec time (for comparison)
+    const exec_start = getMonotonicNs();
+    var exec_total: usize = 0;
+    for (0..b.iterations) |_| {
+        var result = try re.vm.exec(b.text, 0);
+        exec_total += @intFromBool(result.matched);
+        result.deinit();
+    }
+    const total_exec_ns = getMonotonicNs() - exec_start;
+    const avg_exec_ns = @divFloor(total_exec_ns, b.iterations);
+
+    try writer.print("{s:30} | isMatch: {d:>8} ns | execFast: {d:>8} ns | exec: {d:>8} ns | find: {d:>8} ns | findFast: {d:>8} ns\n", .{
         b.name,
-        @divFloor(compile_ns, 1000),
         avg_match_ns,
+        avg_exec_fast_ns,
+        avg_exec_ns,
         avg_find_ns,
+        avg_find_fast_ns,
     });
 }
 
@@ -83,8 +124,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = debug_alloc.allocator();
 
     try stdout_writer.print("\n=== Regex Benchmark ===\n", .{});
-    try stdout_writer.print("{s:30} | {s:>17} | {s:>14} | {s:>14}\n", .{ "Pattern", "Compile (us)", "isMatch (ns)", "find (ns)" });
-    try stdout_writer.print("{s}\n", .{"-" ** 80});
+    try stdout_writer.print("{s:30} | {s:>18} | {s:>18} | {s:>18} | {s:>18} | {s:>18}\n", .{ "Pattern", "isMatch (ns)", "execFast (ns)", "exec (ns)", "find (ns)", "findFast (ns)" });
+    try stdout_writer.print("{s}\n", .{"-" ** 130});
 
     for (benchmarks) |b| {
         runBenchmark(allocator, b, stdout_writer) catch |err| {
@@ -92,6 +133,6 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    try stdout_writer.print("{s}\n", .{"-" ** 80});
+    try stdout_writer.print("{s}\n", .{"-" ** 130});
     try stdout_writer.flush();
 }
