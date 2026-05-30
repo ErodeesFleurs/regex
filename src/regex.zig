@@ -257,40 +257,31 @@ pub const Regex = struct {
     }
 
     pub fn replace(self: *Regex, text: []const u8, replacement: []const u8) ![]u8 {
-        var result: std.ArrayList(u8) = .empty;
-        errdefer result.deinit(self.allocator);
-
-        var match_result_opt = try self.vm.find(text);
-        if (match_result_opt) |*match_result| {
-            defer match_result.deinit();
-            // Append text before match
-            if (match_result.start > 0) {
-                try result.appendSlice(self.allocator, text[0..match_result.start]);
-            }
-            try self.appendReplacement(&result, text, match_result.*, replacement);
-            try result.appendSlice(self.allocator, text[match_result.end..]);
-            return result.toOwnedSlice(self.allocator);
-        }
-
-        // No match, return original text
-        try result.appendSlice(self.allocator, text);
-        return result.toOwnedSlice(self.allocator);
+        return self.replaceLimit(text, replacement, 1);
     }
 
     pub fn replaceAll(self: *Regex, text: []const u8, replacement: []const u8) ![]u8 {
+        return self.replaceLimit(text, replacement, null);
+    }
+
+    fn replaceLimit(self: *Regex, text: []const u8, replacement: []const u8, limit: ?usize) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(self.allocator);
 
         var last_end: usize = 0;
+        var count: usize = 0;
+        const max_replacements = if (limit) |l| l else std.math.maxInt(usize);
+
         var iter = self.findIter(text);
-        while (try iter.next()) |match_result| {
-            var mr = match_result;
+        while (count < max_replacements) {
+            var mr = (try iter.next()) orelse break;
             defer mr.deinit();
             if (mr.start > last_end) {
                 try result.appendSlice(self.allocator, text[last_end..mr.start]);
             }
             try self.appendReplacement(&result, text, mr, replacement);
             last_end = mr.end;
+            count += 1;
         }
 
         if (last_end < text.len) {
