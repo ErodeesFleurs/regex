@@ -1,6 +1,5 @@
 const std = @import("std");
 const AstNode = @import("parser.zig").AstNode;
-const NodeType = @import("parser.zig").NodeType;
 const CharClass = @import("parser.zig").CharClass;
 const Bytecode = @import("bytecode.zig").Bytecode;
 const Instruction = @import("bytecode.zig").Instruction;

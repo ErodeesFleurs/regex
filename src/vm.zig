@@ -1,7 +1,7 @@
 const std = @import("std");
 const Bytecode = @import("bytecode.zig").Bytecode;
 const Instruction = @import("bytecode.zig").Instruction;
-const OpCode = @import("bytecode.zig").OpCode;
+
 const RegexOptions = @import("options.zig").RegexOptions;
 const unicode_case = @import("unicode_case.zig");
 
