@@ -267,22 +267,13 @@ pub const Compiler = struct {
             },
             .WordBoundary => try self.emitOp(.WordBoundary),
             .NotWordBoundary => try self.emitOp(.NotWordBoundary),
-            .UnicodeProperty => {
-                const prop_copy = try self.allocator.dupe(u8, node.unicode_property.?);
-                try self.bytecode.unicode_properties.append(self.allocator, prop_copy);
-                _ = try self.bytecode.emit(.{
-                    .opcode = .UnicodeProperty,
-                    .unicode_property = prop_copy, 
-                    .unicode_negated = false,
-                });
-            },
-            .NotUnicodeProperty => {
+            .UnicodeProperty, .NotUnicodeProperty => {
                 const prop_copy = try self.allocator.dupe(u8, node.unicode_property.?);
                 try self.bytecode.unicode_properties.append(self.allocator, prop_copy);
                 _ = try self.bytecode.emit(.{
                     .opcode = .UnicodeProperty,
                     .unicode_property = prop_copy,
-                    .unicode_negated = true,
+                    .unicode_negated = node.type == .NotUnicodeProperty,
                 });
             },
             .GraphemeCluster => try self.emitOp(.GraphemeCluster),
