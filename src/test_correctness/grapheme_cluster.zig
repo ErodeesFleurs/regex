@@ -55,8 +55,8 @@ test "grapheme cluster: find" {
     if (result) |*r| {
         defer r.deinit();
         try std.testing.expect(r.matched);
-        try std.testing.expectEqual(@as(usize, 0), r.start);
-        try std.testing.expectEqual(@as(usize, 1), r.end);
+        try std.testing.expectEqual(0, r.start);
+        try std.testing.expectEqual(1, r.end);
     } else {
         try std.testing.expect(false);
     }
@@ -72,8 +72,8 @@ test "grapheme cluster: find combining sequence" {
     if (result) |*r| {
         defer r.deinit();
         try std.testing.expect(r.matched);
-        try std.testing.expectEqual(@as(usize, 0), r.start);
-        try std.testing.expectEqual(@as(usize, 3), r.end); // 1 byte for 'e' + 2 bytes for U+0301
+        try std.testing.expectEqual(0, r.start);
+        try std.testing.expectEqual(3, r.end); // 1 byte for 'e' + 2 bytes for U+0301
     } else {
         try std.testing.expect(false);
     }

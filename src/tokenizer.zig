@@ -116,6 +116,14 @@ pub const Tokenizer = struct {
         };
     }
 
+    fn makeInvalidToken(self: *Tokenizer, start_pos: usize) Token {
+        return .{
+            .type = .Invalid,
+            .value = self.input[start_pos..self.position + 1],
+            .position = start_pos,
+        };
+    }
+
     pub fn nextToken(self: *Tokenizer) Token {
         if (self.position >= self.input.len) {
             return .{
@@ -191,7 +199,7 @@ pub const Tokenizer = struct {
                             self.position = hex_end + 1;
                             return self.makeToken(.Literal, start_pos);
                         }
-                        return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                        return self.makeInvalidToken(start_pos);
                     }
                     if (self.position + 2 < self.input.len and
                         std.ascii.isHex(self.input[self.position + 1]) and
@@ -200,7 +208,7 @@ pub const Tokenizer = struct {
                         self.position += 3;
                         return self.makeToken(.Literal, start_pos);
                     }
-                    return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                    return self.makeInvalidToken(start_pos);
                 }
 
             // Unicode escape: \uNNNN or \u{hhhh}
@@ -215,7 +223,7 @@ pub const Tokenizer = struct {
                         self.position = hex_end + 1;
                         return self.makeToken(.Literal, start_pos);
                     }
-                    return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                    return self.makeInvalidToken(start_pos);
                 }
                 if (self.position + 4 < self.input.len and
                     std.ascii.isHex(self.input[self.position + 1]) and
@@ -226,7 +234,7 @@ pub const Tokenizer = struct {
                     self.position += 5;
                     return self.makeToken(.Literal, start_pos);
                 }
-                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                return self.makeInvalidToken(start_pos);
             }
 
             self.position += 1;
@@ -255,7 +263,7 @@ pub const Tokenizer = struct {
                         return self.makeToken(.Literal, start_pos);
                     }
                 }
-                return .{ .type = .Invalid, .value = self.input[start_pos..self.position + 1], .position = start_pos };
+                return self.makeInvalidToken(start_pos);
             }
 
             // Unicode named escape: \N{U+HHHH} or \N{U+HHHHHH}
@@ -285,7 +293,7 @@ pub const Tokenizer = struct {
                     }
                 }
                 // Not a \N{U+...} escape: treat as \N (not newline)
-                return .{ .type = .NotNewline, .value = self.input[start_pos..self.position], .position = start_pos };
+                return self.makeToken(.NotNewline, start_pos);
             }
 
             // Unicode property: \p{...} or \P{...}
@@ -298,11 +306,7 @@ pub const Tokenizer = struct {
                     }
                     if (prop_end < self.input.len and self.input[prop_end] == '}') {
                         self.position = prop_end + 1;
-                        return .{
-                            .type = if (next_ch == 'p') .UnicodeProperty else .NotUnicodeProperty,
-                            .value = self.input[start_pos..self.position],
-                            .position = start_pos,
-                        };
+                        return self.makeToken(if (next_ch == 'p') .UnicodeProperty else .NotUnicodeProperty, start_pos);
                     }
                 }
             }
@@ -317,11 +321,7 @@ pub const Tokenizer = struct {
                     }
                     if (name_end < self.input.len and self.input[name_end] == '>' and name_end > name_start) {
                         self.position = name_end + 1;
-                        return .{
-                            .type = .NamedBackref,
-                            .value = self.input[start_pos..self.position],
-                            .position = start_pos,
-                        };
+                        return self.makeToken(.NamedBackref, start_pos);
                     }
                 } else if (self.position < self.input.len and self.input[self.position] == '{') {
                     // \g{...} format (relative/absolute numeric or braced name)
@@ -332,22 +332,14 @@ pub const Tokenizer = struct {
                     }
                     if (content_end < self.input.len and self.input[content_end] == '}' and content_end > content_start) {
                         self.position = content_end + 1;
-                        return .{
-                            .type = .NamedBackref,
-                            .value = self.input[start_pos..self.position],
-                            .position = start_pos,
-                        };
+                        return self.makeToken(.NamedBackref, start_pos);
                     }
                 }
             }
 
             // Grapheme cluster: \X
             if (next_ch == 'X') {
-                return .{
-                    .type = .GraphemeCluster,
-                    .value = self.input[start_pos..self.position],
-                    .position = start_pos,
-                };
+                return self.makeToken(.GraphemeCluster, start_pos);
             }
 
             // Literal quote: \Q
@@ -382,11 +374,7 @@ pub const Tokenizer = struct {
                 else => .Invalid,
             };
 
-            return .{
-                .type = token_type,
-                .value = self.input[start_pos..self.position],
-                .position = start_pos,
-            };
+            return self.makeToken(token_type, start_pos);
         }
         
         const token_type: TokenType = switch (ch) {
@@ -427,11 +415,7 @@ pub const Tokenizer = struct {
             }
         }
 
-        return .{
-            .type = token_type,
-            .value = self.input[start_pos..self.position],
-            .position = start_pos,
-        };
+        return self.makeToken(token_type, start_pos);
     }
     
     pub fn peek(self: *Tokenizer) Token {

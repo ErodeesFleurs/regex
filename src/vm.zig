@@ -48,7 +48,7 @@ const Frame = struct {
 };
 
 /// Restore state from a backtrack frame, handling both main and sub-match modes.
-inline fn backtrack(
+fn backtrack(
     comptime is_sub: bool,
     frame: Frame,
     captures: *std.ArrayList(?usize),
@@ -72,7 +72,7 @@ inline fn backtrack(
 }
 
 /// Pop frame and backtrack if stack is non-empty. Returns false if stack was empty.
-inline fn maybeBacktrack(
+fn maybeBacktrack(
     comptime is_sub: bool,
     stack: *std.ArrayList(Frame),
     captures: *std.ArrayList(?usize),
@@ -86,20 +86,58 @@ inline fn maybeBacktrack(
     return true;
 }
 
+/// If `advance` is non-null, advance pc/pos and return true.
+/// Otherwise backtrack and return whether backtracking succeeded.
+fn tryMatchOpt(
+    comptime is_sub: bool,
+    stack: *std.ArrayList(Frame),
+    captures: *std.ArrayList(?usize),
+    pc: *usize,
+    pos: *usize,
+    subroutine_stack: *std.ArrayList(usize),
+    options: *RegexOptions,
+    advance: ?usize,
+) bool {
+    if (advance) |len| {
+        pc.* += 1;
+        pos.* += len;
+        return true;
+    }
+    return maybeBacktrack(is_sub, stack, captures, pc, pos, subroutine_stack, options);
+}
+
+/// If `matched` is true, advance pc/pos by `advance_by` and return true.
+/// Otherwise backtrack and return whether backtracking succeeded.
+fn tryMatch(
+    comptime is_sub: bool,
+    stack: *std.ArrayList(Frame),
+    captures: *std.ArrayList(?usize),
+    pc: *usize,
+    pos: *usize,
+    subroutine_stack: *std.ArrayList(usize),
+    options: *RegexOptions,
+    matched: bool,
+    advance_by: usize,
+) bool {
+    if (matched) {
+        pc.* += 1;
+        pos.* += advance_by;
+        return true;
+    }
+    return maybeBacktrack(is_sub, stack, captures, pc, pos, subroutine_stack, options);
+}
+
 /// Match a CharClass instruction at the given position.
 /// Returns the byte length to advance if matched, null otherwise.
 inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_sensitive: bool) ?usize {
-    const ch = if (pos < input.len) input[pos] else 0;
+    if (pos >= input.len) return null;
+    const ch = input[pos];
     var matches = false;
     var advance_len: usize = 1;
     const cc = inst.char_class.?.*;
-    const has_ranges = cc.ranges.items.len > 0;
-    const has_posix = cc.posix_classes.items.len > 0;
-    const has_unicode_props = cc.unicode_properties.items.len > 0;
-    const has_unicode_ranges = cc.unicode_ranges.items.len > 0;
 
     // Check ranges and POSIX classes (ASCII single-byte)
-    if (ch < 128 and (has_ranges or has_posix)) {
+    if (ch < 128 and cc.has_ranges_or_posix) {
         const range_match = if (case_sensitive)
             cc.contains(ch)
         else
@@ -112,15 +150,13 @@ inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_
     }
 
     // Check Unicode ranges (both ASCII and non-ASCII)
-    if (!matches and has_unicode_ranges) {
+    if (!matches and cc.has_unicode_ranges) {
         if (ch < 128) {
-            if (cc.containsUnicodeRange(ch)) {
-                matches = true;
-            }
+            matches = cc.containsUnicodeRange(ch);
         } else {
-            const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch 1;
+            const byte_len = std.unicode.utf8ByteSequenceLength(ch) catch 1;
             if (pos + byte_len <= input.len) {
-                const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch input[pos];
+                const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch ch;
                 if (cc.containsUnicodeRange(cp)) {
                     matches = true;
                     advance_len = byte_len;
@@ -130,16 +166,14 @@ inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_
     }
 
     // Check Unicode properties (handles both ASCII and non-ASCII)
-    if (!matches and has_unicode_props) {
+    if (!matches and cc.has_unicode_props) {
         if (matchUnicodePropertyInClass(input, pos, cc)) |byte_len| {
             matches = true;
             advance_len = byte_len;
         }
     }
 
-    if (pos < input.len and matches) {
-        return advance_len;
-    }
+    if (matches) return advance_len;
     return null;
 }
 
@@ -147,7 +181,17 @@ inline fn matchCharClass(inst: Instruction, input: []const u8, pos: usize, case_
 /// Returns the byte length to advance if matched, null otherwise.
 inline fn matchCharUtf8(input: []const u8, pos: usize, expected_cp: u21, case_sensitive: bool) ?usize {
     if (pos >= input.len) return null;
-    const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch return null;
+    const first = input[pos];
+    // Fast path for ASCII characters
+    if (expected_cp < 128 and first < 128) {
+        const matches = if (case_sensitive)
+            first == expected_cp
+        else
+            std.ascii.toLower(first) == std.ascii.toLower(@intCast(expected_cp));
+        if (matches) return 1;
+        return null;
+    }
+    const byte_len = std.unicode.utf8ByteSequenceLength(first) catch return null;
     if (pos + byte_len > input.len) return null;
     const cp = std.unicode.utf8Decode(input[pos .. pos + byte_len]) catch return null;
     const matches = if (case_sensitive)
@@ -273,14 +317,14 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
         }
     }
     // Slow path for non-ASCII or unhandled properties
-    if (std.mem.eql(u8, property, "L")) {
+    if (property.len == 1 and property[0] == 'L') {
         // Letter: includes all letter subcategories
         return isUnicodeProperty(cp, "Lu") or
                isUnicodeProperty(cp, "Ll") or
                isUnicodeProperty(cp, "Lt") or
                isUnicodeProperty(cp, "Lm") or
                isUnicodeProperty(cp, "Lo");
-    } else if (std.mem.eql(u8, property, "Lu")) {
+    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'u') {
         // Uppercase Letter
         return (cp >= 0x0041 and cp <= 0x005A) or
                (cp >= 0x00C0 and cp <= 0x00D6) or
@@ -309,7 +353,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0x1FD8 and cp <= 0x1FDB) or
                (cp >= 0x1FE8 and cp <= 0x1FEC) or
                (cp >= 0x1FF8 and cp <= 0x1FFB);
-    } else if (std.mem.eql(u8, property, "Ll")) {
+    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'l') {
         // Lowercase Letter
         return (cp >= 0x0061 and cp <= 0x007A) or
                (cp >= 0x00DF and cp <= 0x00F6) or
@@ -340,7 +384,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0x1FE0 and cp <= 0x1FE1) or
                (cp >= 0x214E and cp <= 0x214E) or
                (cp >= 0x2170 and cp <= 0x217F);
-    } else if (std.mem.eql(u8, property, "Lt")) {
+    } else if (property.len == 2 and property[0] == 'L' and property[1] == 't') {
         // Titlecase Letter
         return (cp >= 0x01C5 and cp <= 0x01C5) or
                (cp >= 0x01C8 and cp <= 0x01C8) or
@@ -352,7 +396,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0x1FBC and cp <= 0x1FBC) or
                (cp >= 0x1FCC and cp <= 0x1FCC) or
                (cp >= 0x1FFC and cp <= 0x1FFC);
-    } else if (std.mem.eql(u8, property, "Lm")) {
+    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'm') {
         // Modifier Letter
         return (cp >= 0x02B0 and cp <= 0x02C1) or
                (cp >= 0x02C6 and cp <= 0x02D1) or
@@ -400,7 +444,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xAAF3 and cp <= 0xAAF4) or
                (cp >= 0xFF70 and cp <= 0xFF70) or
                (cp >= 0xFF9E and cp <= 0xFF9F);
-    } else if (std.mem.eql(u8, property, "Lo")) {
+    } else if (property.len == 2 and property[0] == 'L' and property[1] == 'o') {
         // Other Letter
         return (cp >= 0x01BB and cp <= 0x01BB) or
                (cp >= 0x01C0 and cp <= 0x01C3) or
@@ -757,11 +801,11 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFFCA and cp <= 0xFFCF) or
                (cp >= 0xFFD2 and cp <= 0xFFD7) or
                (cp >= 0xFFDA and cp <= 0xFFDC);
-    } else if (std.mem.eql(u8, property, "N")) {
+    } else if (property.len == 1 and property[0] == 'N') {
         return isUnicodeProperty(cp, "Nd") or
                isUnicodeProperty(cp, "Nl") or
                isUnicodeProperty(cp, "No");
-    } else if (std.mem.eql(u8, property, "Nd")) {
+    } else if (property.len == 2 and property[0] == 'N' and property[1] == 'd') {
         // Decimal Number
         return (cp >= 0x0030 and cp <= 0x0039) or
                (cp >= 0x0660 and cp <= 0x0669) or
@@ -799,7 +843,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xAA50 and cp <= 0xAA59) or
                (cp >= 0xABF0 and cp <= 0xABF9) or
                (cp >= 0xFF10 and cp <= 0xFF19);
-    } else if (std.mem.eql(u8, property, "Nl")) {
+    } else if (property.len == 2 and property[0] == 'N' and property[1] == 'l') {
         // Letter Number
         return (cp >= 0x16EE and cp <= 0x16F0) or
                (cp >= 0x2160 and cp <= 0x2182) or
@@ -808,7 +852,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0x3021 and cp <= 0x3029) or
                (cp >= 0x3038 and cp <= 0x303A) or
                (cp >= 0xA6E6 and cp <= 0xA6EF);
-    } else if (std.mem.eql(u8, property, "No")) {
+    } else if (property.len == 2 and property[0] == 'N' and property[1] == 'o') {
         // Other Number
         return (cp >= 0x00B2 and cp <= 0x00B3) or
                (cp >= 0x00B9 and cp <= 0x00B9) or
@@ -839,7 +883,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0x3280 and cp <= 0x3289) or
                (cp >= 0x32B1 and cp <= 0x32BF) or
                (cp >= 0xA830 and cp <= 0xA835);
-    } else if (std.mem.eql(u8, property, "P")) {
+    } else if (property.len == 1 and property[0] == 'P') {
         return isUnicodeProperty(cp, "Pc") or
                isUnicodeProperty(cp, "Pd") or
                isUnicodeProperty(cp, "Ps") or
@@ -847,7 +891,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                isUnicodeProperty(cp, "Pi") or
                isUnicodeProperty(cp, "Pf") or
                isUnicodeProperty(cp, "Po");
-    } else if (std.mem.eql(u8, property, "Pc")) {
+    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'c') {
         // Connector Punctuation
         return (cp >= 0x005F and cp <= 0x005F) or
                (cp >= 0x203F and cp <= 0x2040) or
@@ -855,7 +899,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFE33 and cp <= 0xFE34) or
                (cp >= 0xFE4D and cp <= 0xFE4F) or
                (cp >= 0xFF3F and cp <= 0xFF3F);
-    } else if (std.mem.eql(u8, property, "Pd")) {
+    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'd') {
         // Dash Punctuation
         return (cp >= 0x002D and cp <= 0x002D) or
                (cp >= 0x058A and cp <= 0x058A) or
@@ -874,7 +918,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFE58 and cp <= 0xFE58) or
                (cp >= 0xFE63 and cp <= 0xFE63) or
                (cp >= 0xFF0D and cp <= 0xFF0D);
-    } else if (std.mem.eql(u8, property, "Ps")) {
+    } else if (property.len == 2 and property[0] == 'P' and property[1] == 's') {
         // Open Punctuation
         return (cp >= 0x0028 and cp <= 0x0028) or
                (cp >= 0x005B and cp <= 0x005B) or
@@ -950,7 +994,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFF5B and cp <= 0xFF5B) or
                (cp >= 0xFF5F and cp <= 0xFF5F) or
                (cp >= 0xFF62 and cp <= 0xFF62);
-    } else if (std.mem.eql(u8, property, "Pe")) {
+    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'e') {
         // Close Punctuation
         return (cp >= 0x0029 and cp <= 0x0029) or
                (cp >= 0x005D and cp <= 0x005D) or
@@ -1024,20 +1068,20 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFF5D and cp <= 0xFF5D) or
                (cp >= 0xFF60 and cp <= 0xFF60) or
                (cp >= 0xFF63 and cp <= 0xFF63);
-    } else if (std.mem.eql(u8, property, "Pi")) {
+    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'i') {
         // Initial Punctuation
         return (cp >= 0x00AB and cp <= 0x00AB) or
                (cp >= 0x2018 and cp <= 0x2018) or
                (cp >= 0x201B and cp <= 0x201C) or
                (cp >= 0x201F and cp <= 0x201F) or
                (cp >= 0x2039 and cp <= 0x2039);
-    } else if (std.mem.eql(u8, property, "Pf")) {
+    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'f') {
         // Final Punctuation
         return (cp >= 0x00BB and cp <= 0x00BB) or
                (cp >= 0x2019 and cp <= 0x2019) or
                (cp >= 0x201D and cp <= 0x201D) or
                (cp >= 0x203A and cp <= 0x203A);
-    } else if (std.mem.eql(u8, property, "Po")) {
+    } else if (property.len == 2 and property[0] == 'P' and property[1] == 'o') {
         // Other Punctuation
         return (cp >= 0x0021 and cp <= 0x0023) or
                (cp >= 0x0025 and cp <= 0x002A) or
@@ -1160,12 +1204,12 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFF3C and cp <= 0xFF3C) or
                (cp >= 0xFF61 and cp <= 0xFF61) or
                (cp >= 0xFF64 and cp <= 0xFF65);
-    } else if (std.mem.eql(u8, property, "S")) {
+    } else if (property.len == 1 and property[0] == 'S') {
         return isUnicodeProperty(cp, "Sc") or
                isUnicodeProperty(cp, "Sk") or
                isUnicodeProperty(cp, "Sm") or
                isUnicodeProperty(cp, "So");
-    } else if (std.mem.eql(u8, property, "Sc")) {
+    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'c') {
         // Currency Symbol
         return (cp >= 0x0024 and cp <= 0x0024) or
                (cp >= 0x00A2 and cp <= 0x00A5) or
@@ -1184,7 +1228,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFF04 and cp <= 0xFF04) or
                (cp >= 0xFFE0 and cp <= 0xFFE1) or
                (cp >= 0xFFE5 and cp <= 0xFFE6);
-    } else if (std.mem.eql(u8, property, "Sk")) {
+    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'k') {
         // Modifier Symbol
         return (cp >= 0x005E and cp <= 0x005E) or
                (cp >= 0x0060 and cp <= 0x0060) or
@@ -1214,7 +1258,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFF3E and cp <= 0xFF3E) or
                (cp >= 0xFF40 and cp <= 0xFF40) or
                (cp >= 0xFFE3 and cp <= 0xFFE3);
-    } else if (std.mem.eql(u8, property, "Sm")) {
+    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'm') {
         // Math Symbol
         return (cp >= 0x002B and cp <= 0x002B) or
                (cp >= 0x003C and cp <= 0x003E) or
@@ -1270,7 +1314,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFF5E and cp <= 0xFF5E) or
                (cp >= 0xFFE2 and cp <= 0xFFE2) or
                (cp >= 0xFFE9 and cp <= 0xFFEC);
-    } else if (std.mem.eql(u8, property, "So")) {
+    } else if (property.len == 2 and property[0] == 'S' and property[1] == 'o') {
         // Other Symbol
         return (cp >= 0x00A6 and cp <= 0x00A7) or
                (cp >= 0x00A9 and cp <= 0x00A9) or
@@ -1374,11 +1418,11 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xAA77 and cp <= 0xAA79) or
                (cp >= 0xFDFD and cp <= 0xFDFD) or
                (cp >= 0xFFFC and cp <= 0xFFFD);
-    } else if (std.mem.eql(u8, property, "Z")) {
+    } else if (property.len == 1 and property[0] == 'Z') {
         return isUnicodeProperty(cp, "Zs") or
                isUnicodeProperty(cp, "Zl") or
                isUnicodeProperty(cp, "Zp");
-    } else if (std.mem.eql(u8, property, "Zs")) {
+    } else if (property.len == 2 and property[0] == 'Z' and property[1] == 's') {
         // Space Separator
         return (cp >= 0x0020 and cp <= 0x0020) or
                (cp >= 0x00A0 and cp <= 0x00A0) or
@@ -1387,23 +1431,23 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0x202F and cp <= 0x202F) or
                (cp >= 0x205F and cp <= 0x205F) or
                (cp >= 0x3000 and cp <= 0x3000);
-    } else if (std.mem.eql(u8, property, "Zl")) {
+    } else if (property.len == 2 and property[0] == 'Z' and property[1] == 'l') {
         // Line Separator
         return (cp >= 0x2028 and cp <= 0x2028);
-    } else if (std.mem.eql(u8, property, "Zp")) {
+    } else if (property.len == 2 and property[0] == 'Z' and property[1] == 'p') {
         // Paragraph Separator
         return (cp >= 0x2029 and cp <= 0x2029);
-    } else if (std.mem.eql(u8, property, "C")) {
+    } else if (property.len == 1 and property[0] == 'C') {
         // Other
         return isUnicodeProperty(cp, "Cc") or
                isUnicodeProperty(cp, "Cf") or
                isUnicodeProperty(cp, "Co") or
                isUnicodeProperty(cp, "Cs");
-    } else if (std.mem.eql(u8, property, "Cc")) {
+    } else if (property.len == 2 and property[0] == 'C' and property[1] == 'c') {
         // Control
         return (cp >= 0x0000 and cp <= 0x001F) or
                (cp >= 0x007F and cp <= 0x009F);
-    } else if (std.mem.eql(u8, property, "Cf")) {
+    } else if (property.len == 2 and property[0] == 'C' and property[1] == 'f') {
         // Format
         return (cp >= 0x00AD and cp <= 0x00AD) or
                (cp >= 0x0600 and cp <= 0x0605) or
@@ -1423,20 +1467,20 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0x1D173 and cp <= 0x1D17A) or
                (cp >= 0xE0001 and cp <= 0xE0001) or
                (cp >= 0xE0020 and cp <= 0xE007F);
-    } else if (std.mem.eql(u8, property, "Co")) {
+    } else if (property.len == 2 and property[0] == 'C' and property[1] == 'o') {
         // Private Use
         return (cp >= 0xE000 and cp <= 0xF8FF) or
                (cp >= 0xF0000 and cp <= 0xFFFFD) or
                (cp >= 0x100000 and cp <= 0x10FFFD);
-    } else if (std.mem.eql(u8, property, "Cs")) {
+    } else if (property.len == 2 and property[0] == 'C' and property[1] == 's') {
         // Surrogate
         return (cp >= 0xD800 and cp <= 0xDFFF);
-    } else if (std.mem.eql(u8, property, "M")) {
+    } else if (property.len == 1 and property[0] == 'M') {
         // Mark
         return isUnicodeProperty(cp, "Mn") or
                isUnicodeProperty(cp, "Mc") or
                isUnicodeProperty(cp, "Me");
-    } else if (std.mem.eql(u8, property, "Mn")) {
+    } else if (property.len == 2 and property[0] == 'M' and property[1] == 'n') {
         // Nonspacing Mark
         return (cp >= 0x0300 and cp <= 0x036F) or
                (cp >= 0x0483 and cp <= 0x0489) or
@@ -1638,7 +1682,7 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xFB1E and cp <= 0xFB1E) or
                (cp >= 0xFE00 and cp <= 0xFE0F) or
                (cp >= 0xFE20 and cp <= 0xFE2F);
-    } else if (std.mem.eql(u8, property, "Mc")) {
+    } else if (property.len == 2 and property[0] == 'M' and property[1] == 'c') {
         // Spacing Combining Mark
         return (cp >= 0x0903 and cp <= 0x0903) or
                (cp >= 0x093B and cp <= 0x093B) or
@@ -1757,56 +1801,56 @@ fn isUnicodeProperty(cp: u21, property: []const u8) bool {
                (cp >= 0xAB30 and cp <= 0xAB5A) or
                (cp >= 0xAB5C and cp <= 0xAB5F) or
                (cp >= 0xAB60 and cp <= 0xAB65);
-    } else if (std.mem.eql(u8, property, "Me")) {
+    } else if (property.len == 2 and property[0] == 'M' and property[1] == 'e') {
         // Enclosing Mark
         return (cp >= 0x0488 and cp <= 0x0489) or
                (cp >= 0x1ABE and cp <= 0x1ABE) or
                (cp >= 0x20DD and cp <= 0x20E0) or
                (cp >= 0x20E2 and cp <= 0x20E4) or
                (cp >= 0xA670 and cp <= 0xA672);
-    } else if (std.mem.eql(u8, property, "Han")) {
+    } else if (property.len == 3 and property[0] == 'H' and property[1] == 'a' and property[2] == 'n') {
         return (cp >= 0x4E00 and cp <= 0x9FFF) or
                (cp >= 0x3400 and cp <= 0x4DBF) or
                (cp >= 0xF900 and cp <= 0xFAFF);
-    } else if (std.mem.eql(u8, property, "Latin")) {
+    } else if (property.len == 5 and property[0] == 'L' and property[1] == 'a' and property[2] == 't' and property[3] == 'i' and property[4] == 'n') {
         return (cp >= 0x0041 and cp <= 0x007A) or
                (cp >= 0x00C0 and cp <= 0x00FF) or
                (cp >= 0x0100 and cp <= 0x017F) or
                (cp >= 0x0180 and cp <= 0x024F);
-    } else if (std.mem.eql(u8, property, "Greek")) {
+    } else if (property.len == 5 and property[0] == 'G' and property[1] == 'r' and property[2] == 'e' and property[3] == 'e' and property[4] == 'k') {
         return (cp >= 0x0370 and cp <= 0x03FF) or
                (cp >= 0x1F00 and cp <= 0x1FFF);
-    } else if (std.mem.eql(u8, property, "Cyrillic")) {
+    } else if (property.len == 8 and property[0] == 'C' and property[1] == 'y' and property[2] == 'r' and property[3] == 'i' and property[4] == 'l' and property[5] == 'l' and property[6] == 'i' and property[7] == 'c') {
         return (cp >= 0x0400 and cp <= 0x04FF) or
                (cp >= 0x0500 and cp <= 0x052F) or
                (cp >= 0x2DE0 and cp <= 0x2DFF) or
                (cp >= 0xA640 and cp <= 0xA69F);
-    } else if (std.mem.eql(u8, property, "Arabic")) {
+    } else if (property.len == 6 and property[0] == 'A' and property[1] == 'r' and property[2] == 'a' and property[3] == 'b' and property[4] == 'i' and property[5] == 'c') {
         return (cp >= 0x0600 and cp <= 0x06FF) or
                (cp >= 0x0750 and cp <= 0x077F) or
                (cp >= 0x08A0 and cp <= 0x08FF) or
                (cp >= 0xFB50 and cp <= 0xFDFF) or
                (cp >= 0xFE70 and cp <= 0xFEFF);
-    } else if (std.mem.eql(u8, property, "Hebrew")) {
+    } else if (property.len == 6 and property[0] == 'H' and property[1] == 'e' and property[2] == 'b' and property[3] == 'r' and property[4] == 'e' and property[5] == 'w') {
         return (cp >= 0x0590 and cp <= 0x05FF) or
                (cp >= 0xFB1D and cp <= 0xFB4F);
-    } else if (std.mem.eql(u8, property, "Armenian")) {
+    } else if (property.len == 8 and property[0] == 'A' and property[1] == 'r' and property[2] == 'm' and property[3] == 'e' and property[4] == 'n' and property[5] == 'i' and property[6] == 'a' and property[7] == 'n') {
         return cp >= 0x0530 and cp <= 0x058F;
-    } else if (std.mem.eql(u8, property, "Georgian")) {
+    } else if (property.len == 8 and property[0] == 'G' and property[1] == 'e' and property[2] == 'o' and property[3] == 'r' and property[4] == 'g' and property[5] == 'i' and property[6] == 'a' and property[7] == 'n') {
         return (cp >= 0x10A0 and cp <= 0x10FF) or
                (cp >= 0x2D00 and cp <= 0x2D2F);
-    } else if (std.mem.eql(u8, property, "Thai")) {
+    } else if (property.len == 4 and property[0] == 'T' and property[1] == 'h' and property[2] == 'a' and property[3] == 'i') {
         return cp >= 0x0E00 and cp <= 0x0E7F;
-    } else if (std.mem.eql(u8, property, "Devanagari")) {
+    } else if (property.len == 10 and property[0] == 'D' and property[1] == 'e' and property[2] == 'v' and property[3] == 'a' and property[4] == 'n' and property[5] == 'a' and property[6] == 'g' and property[7] == 'a' and property[8] == 'r' and property[9] == 'i') {
         return cp >= 0x0900 and cp <= 0x097F;
-    } else if (std.mem.eql(u8, property, "Hiragana")) {
+    } else if (property.len == 8 and property[0] == 'H' and property[1] == 'i' and property[2] == 'r' and property[3] == 'a' and property[4] == 'g' and property[5] == 'a' and property[6] == 'n' and property[7] == 'a') {
         return (cp >= 0x3040 and cp <= 0x309F) or
                (cp >= 0x1B001 and cp <= 0x1B11F);
-    } else if (std.mem.eql(u8, property, "Katakana")) {
+    } else if (property.len == 8 and property[0] == 'K' and property[1] == 'a' and property[2] == 't' and property[3] == 'a' and property[4] == 'k' and property[5] == 'a' and property[6] == 'n' and property[7] == 'a') {
         return (cp >= 0x30A0 and cp <= 0x30FF) or
                (cp >= 0x31F0 and cp <= 0x31FF) or
                (cp >= 0xFF65 and cp <= 0xFF9F);
-    } else if (std.mem.eql(u8, property, "Hangul")) {
+    } else if (property.len == 6 and property[0] == 'H' and property[1] == 'a' and property[2] == 'n' and property[3] == 'g' and property[4] == 'u' and property[5] == 'l') {
         return (cp >= 0x1100 and cp <= 0x11FF) or
                (cp >= 0x3130 and cp <= 0x318F) or
                (cp >= 0xA960 and cp <= 0xA97F) or
@@ -1995,28 +2039,45 @@ pub const Vm = struct {
     atomic_stack: std.ArrayList(usize) = .empty,
     last_match_end: usize = 0,
     last_pos: std.ArrayList(?usize) = .empty,
+    // Reusable per-match buffer for captures (size is fixed after compile)
+    captures_buf: std.ArrayList(?usize) = .empty,
 
-    pub fn init(allocator: std.mem.Allocator, bytecode: Bytecode, options: RegexOptions) Vm {
-        return .{
+    pub fn init(allocator: std.mem.Allocator, bytecode: Bytecode, options: RegexOptions) !Vm {
+        var vm = Vm{
             .bytecode = bytecode,
             .allocator = allocator,
             .options = options,
             .atomic_stack = .empty,
             .last_match_end = 0,
             .last_pos = .empty,
+            .captures_buf = .empty,
         };
+        // Pre-allocate fixed-size buffers based on bytecode size
+        try vm.captures_buf.resize(allocator, (bytecode.num_groups + 1) * 2);
+        try vm.last_pos.resize(allocator, bytecode.instructions.items.len);
+        try vm.atomic_stack.ensureTotalCapacity(allocator, 64);
+        return vm;
     }
 
     pub fn deinit(self: *Vm) void {
         self.atomic_stack.deinit(self.allocator);
         self.last_pos.deinit(self.allocator);
+        self.captures_buf.deinit(self.allocator);
     }
 
     /// Shared VM execution engine.
     fn execInternal(comptime is_sub: bool, self: *Vm, input: []const u8, start_pos: usize, start_pc: usize, end_pc: usize) !MatchResult {
+        // Use pre-allocated captures buffer, resizing only if bytecode grew
+        const captures_needed = (self.bytecode.num_groups + 1) * 2;
+        if (self.captures_buf.items.len < captures_needed) {
+            try self.captures_buf.resize(self.allocator, captures_needed);
+        }
         var captures: std.ArrayList(?usize) = .empty;
-        try captures.resize(self.allocator, (self.bytecode.num_groups + 1) * 2);
-        @memset(captures.items, null);
+        captures.items = self.captures_buf.items[0..captures_needed];
+        captures.capacity = captures_needed;
+        if (!is_sub) {
+            @memset(captures.items, null);
+        }
 
         var stack: std.ArrayList(Frame) = .empty;
         defer stack.deinit(self.allocator);
@@ -2029,7 +2090,9 @@ pub const Vm = struct {
         const max_steps = self.options.max_steps;
 
         if (!is_sub) {
-            try self.last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
+            if (self.last_pos.items.len < self.bytecode.instructions.items.len) {
+                try self.last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
+            }
             @memset(self.last_pos.items, null);
         }
 
@@ -2061,84 +2124,45 @@ pub const Vm = struct {
 
             switch (inst.opcode) {
                 .Char => {
-                    const matches = if (self.options.case_sensitive)
-                        (pos < input.len and input[pos] == inst.char.?)
-                    else
-                        (pos < input.len and unicode_case.caseInsensitiveEqual(input[pos], inst.char.?));
-                    if (matches) {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
+                    var matches = false;
+                    if (pos < input.len) {
+                        const ch = input[pos];
+                        const pat = inst.char.?;
+                        if (self.options.case_sensitive or ch >= 128 or pat >= 128) {
+                            matches = ch == pat;
+                        } else {
+                            matches = std.ascii.toLower(ch) == std.ascii.toLower(pat);
+                        }
                     }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matches, 1)) break;
                 },
                 .CharUtf8 => {
-                    if (matchCharUtf8(input, pos, inst.char_codepoint.?, self.options.case_sensitive)) |byte_len| {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchCharUtf8(input, pos, inst.char_codepoint.?, self.options.case_sensitive))) break;
                 },
                 .Any => {
-                    if (pos < input.len and (self.options.dot_matches_newline or input[pos] != '\n')) {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos < input.len and (self.options.dot_matches_newline or input[pos] != '\n'), 1)) break;
                 },
                 .CharClass => {
-                    if (matchCharClass(inst, input, pos, self.options.case_sensitive)) |adv| {
-                        pc += 1;
-                        pos += adv;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchCharClass(inst, input, pos, self.options.case_sensitive))) break;
                 },
                 .UnicodeProperty => {
-                    if (matchUnicodeProperty(input, pos, inst.unicode_property.?, inst.unicode_negated)) |byte_len| {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchUnicodeProperty(input, pos, inst.unicode_property.?, inst.unicode_negated))) break;
                 },
                 .GraphemeCluster => {
-                    if (matchGraphemeCluster(input, pos)) |byte_len| {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchGraphemeCluster(input, pos))) break;
                 },
                 .Newline => {
-                    if (matchNewline(input, pos)) |byte_len| {
-                        pc += 1;
-                        pos += byte_len;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchNewline(input, pos))) break;
                 },
                 .ResetMatchStart => {
                     captures.items[0] = pos;
                     pc += 1;
                 },
                 .NotNewline => {
-                    if (pos < input.len and input[pos] != '\n') {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos < input.len and input[pos] != '\n', 1)) break;
                 },
                 .NotVerticalWhitespace => {
-                    if (pos < input.len and isLineEndingChar(input, pos) == null) {
-                        pc += 1;
-                        pos += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos < input.len and isLineEndingChar(input, pos) == null, 1)) break;
                 },
                 .Split => {
                     if (!is_sub) {
@@ -2226,61 +2250,28 @@ pub const Vm = struct {
                     }
                 },
                 .Backref => {
-                    if (matchBackref(input, pos, captures.items, inst.backref_group.?, self.options.case_sensitive)) |len| {
-                        pc += 1;
-                        pos += len;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatchOpt(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, matchBackref(input, pos, captures.items, inst.backref_group.?, self.options.case_sensitive))) break;
                 },
                 .WordBoundary => {
-                    if (checkWordBoundary(input, pos)) {
-                        pc += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, checkWordBoundary(input, pos), 0)) break;
                 },
                 .NotWordBoundary => {
-                    if (!checkWordBoundary(input, pos)) {
-                        pc += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, !checkWordBoundary(input, pos), 0)) break;
                 },
                 .AssertStart => {
-                    if (checkAssertStart(pos, input, self.options.multiline)) {
-                        pc += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, checkAssertStart(pos, input, self.options.multiline), 0)) break;
                 },
                 .AssertEnd => {
-                    if (checkAssertEnd(pos, input, self.options.multiline)) {
-                        pc += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, checkAssertEnd(pos, input, self.options.multiline), 0)) break;
                 },
                 .AssertStringStart => {
-                    if (pos == 0) {
-                        pc += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos == 0, 0)) break;
                 },
                 .AssertStringEnd => {
-                    if (pos == input.len) {
-                        pc += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos == input.len, 0)) break;
                 },
                 .AssertStringEndAllowNewline => {
-                    if (pos == input.len or (pos + 1 == input.len and input[pos] == '\n')) {
-                        pc += 1;
-                    } else {
-                        if (!maybeBacktrack(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options)) break;
-                    }
+                    if (!tryMatch(is_sub, &stack, &captures, &pc, &pos, &subroutine_stack, &self.options, pos == input.len or (pos + 1 == input.len and input[pos] == '\n'), 0)) break;
                 },
                 .AssertMatchStart => {
                     if (is_sub) {
@@ -2376,13 +2367,26 @@ pub const Vm = struct {
             }
         }
 
-        return MatchResult{
-            .matched = matched,
-            .captures = captures,
-            .start = if (captures.items[0]) |s| s else start_pos,
-            .end = match_end,
-            .allocator = self.allocator,
-        };
+        if (is_sub) {
+            // Sub-matches don't need to return captures
+            return MatchResult{
+                .matched = matched,
+                .captures = .empty,
+                .start = start_pos,
+                .end = match_end,
+                .allocator = self.allocator,
+            };
+        } else {
+            // Main match: clone captures for the caller
+            const owned_captures = try self.allocator.dupe(?usize, captures.items);
+            return MatchResult{
+                .matched = matched,
+                .captures = .{ .items = owned_captures, .capacity = owned_captures.len },
+                .start = if (captures.items[0]) |s| s else start_pos,
+                .end = match_end,
+                .allocator = self.allocator,
+            };
+        }
     }
 
 
@@ -2400,8 +2404,10 @@ pub const Vm = struct {
             while (start <= input.len) {
                 // Find next position matching first_char
                 if (self.options.case_sensitive) {
-                    while (start < input.len and input[start] != first) {
-                        start += 1;
+                    if (std.mem.indexOfScalar(u8, input[start..], first)) |idx| {
+                        start += idx;
+                    } else {
+                        break;
                     }
                 } else {
                     // Fast path: ASCII characters can use simple toLower comparison
@@ -2459,7 +2465,7 @@ test "vm literal match" {
 
     const bytecode = try compiler.compile(ast.?, .{});
 
-    var vm = Vm.init(allocator, bytecode, .{});
+    var vm = try Vm.init(allocator, bytecode, .{});
     defer vm.deinit();
 
     try std.testing.expect(try vm.match("a"));
@@ -2481,7 +2487,7 @@ test "vm concat" {
 
     const bytecode = try compiler.compile(ast.?, .{});
 
-    var vm = Vm.init(allocator, bytecode, .{});
+    var vm = try Vm.init(allocator, bytecode, .{});
     defer vm.deinit();
 
     try std.testing.expect(try vm.match("ab"));
@@ -2503,7 +2509,7 @@ test "vm alternate" {
 
     const bytecode = try compiler.compile(ast.?, .{});
 
-    var vm = Vm.init(allocator, bytecode, .{});
+    var vm = try Vm.init(allocator, bytecode, .{});
     defer vm.deinit();
 
     try std.testing.expect(try vm.match("a"));
@@ -2526,7 +2532,7 @@ test "vm star" {
 
     const bytecode = try compiler.compile(ast.?, .{});
 
-    var vm = Vm.init(allocator, bytecode, .{});
+    var vm = try Vm.init(allocator, bytecode, .{});
     defer vm.deinit();
 
     try std.testing.expect(try vm.match(""));
@@ -2552,7 +2558,7 @@ test "vm group" {
 
     const bytecode = try compiler.compile(ast.?, .{});
 
-    var vm = Vm.init(allocator, bytecode, .{});
+    var vm = try Vm.init(allocator, bytecode, .{});
     defer vm.deinit();
 
     var result = try vm.find("ab");

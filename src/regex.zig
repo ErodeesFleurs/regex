@@ -51,7 +51,7 @@ pub const Regex = struct {
         }
 
         return Regex{
-            .vm = Vm.init(allocator, bytecode, options),
+            .vm = try Vm.init(allocator, bytecode, options),
             .allocator = allocator,
             .options = options,
             .group_names = group_names,
@@ -106,13 +106,16 @@ pub const Regex = struct {
         return result;
     }
     
+    fn deinitMatchResults(results: *std.ArrayList(MatchResult)) void {
+        for (results.items) |*r| {
+            r.deinit();
+        }
+    }
+
     pub fn findAll(self: *Regex, text: []const u8) !std.ArrayList(MatchResult) {
         var results: std.ArrayList(MatchResult) = .empty;
         errdefer {
-            for (0..results.items.len) |i| {
-                var r = &results.items[i];
-                r.deinit();
-            }
+            deinitMatchResults(&results);
             results.deinit(self.allocator);
         }
 
@@ -282,38 +285,17 @@ pub const Regex = struct {
         errdefer result.deinit(self.allocator);
 
         var last_end: usize = 0;
-        var pos: usize = 0;
-
-        while (pos <= text.len) {
-            var match_result = try self.vm.exec(text, pos);
-            if (!match_result.matched) {
-                match_result.deinit();
-                pos += 1;
-                continue;
+        var iter = self.findIter(text);
+        while (try iter.next()) |match_result| {
+            var mr = match_result;
+            defer mr.deinit();
+            if (mr.start > last_end) {
+                try result.appendSlice(self.allocator, text[last_end..mr.start]);
             }
-
-            // Save start/end because they can't be accessed after deinit
-            const m_start = match_result.start;
-            const m_end = match_result.end;
-
-            // Append text before match
-            if (m_start > last_end) {
-                try result.appendSlice(self.allocator, text[last_end..m_start]);
-            }
-
-            // Append replacement text
-            try self.appendReplacement(&result, text, match_result, replacement);
-
-            last_end = m_end;
-            pos = m_end;
-            match_result.deinit();
-
-            if (m_start == m_end) {
-                pos += 1;
-            }
+            try self.appendReplacement(&result, text, mr, replacement);
+            last_end = mr.end;
         }
 
-        // Append remaining text
         if (last_end < text.len) {
             try result.appendSlice(self.allocator, text[last_end..]);
         }
@@ -326,40 +308,19 @@ pub const Regex = struct {
         errdefer result.deinit(self.allocator);
 
         var last_end: usize = 0;
-        var pos: usize = 0;
-
-        while (pos <= text.len) {
-            var match_result = try self.vm.exec(text, pos);
-            if (!match_result.matched) {
-                match_result.deinit();
-                pos += 1;
-                continue;
+        var iter = self.findIter(text);
+        while (try iter.next()) |match_result| {
+            var mr = match_result;
+            defer mr.deinit();
+            if (mr.start > last_end) {
+                try result.appendSlice(self.allocator, text[last_end..mr.start]);
             }
-
-            // Save start/end because they can't be accessed after deinit
-            const m_start = match_result.start;
-            const m_end = match_result.end;
-
-            // Append text before match
-            if (m_start > last_end) {
-                try result.appendSlice(self.allocator, text[last_end..m_start]);
-            }
-
-            // Call replacement function
-            const match_text = text[match_result.start..match_result.end];
-            const repl_text = replFn(match_text, match_result);
+            const match_text = text[mr.start..mr.end];
+            const repl_text = replFn(match_text, mr);
             try result.appendSlice(self.allocator, repl_text);
-
-            last_end = m_end;
-            pos = m_end;
-            match_result.deinit();
-
-            if (m_start == m_end) {
-                pos += 1;
-            }
+            last_end = mr.end;
         }
 
-        // Append remaining text
         if (last_end < text.len) {
             try result.appendSlice(self.allocator, text[last_end..]);
         }
@@ -376,34 +337,20 @@ pub const Regex = struct {
         errdefer results.deinit(self.allocator);
 
         var last_end: usize = 0;
-        var pos: usize = 0;
         var count: usize = 0;
         const max_splits = if (limit) |l| l else std.math.maxInt(usize);
 
-        while (pos <= text.len and count < max_splits) {
-            var match_result = try self.vm.exec(text, pos);
-            if (!match_result.matched) {
-                match_result.deinit();
-                pos += 1;
-                continue;
-            }
-            defer match_result.deinit();
+        var iter = self.findIter(text);
+        while (count < max_splits) {
+            var mr = (try iter.next()) orelse break;
+            defer mr.deinit();
 
-            // Append text before match (including empty string)
-            try results.append(self.allocator, text[last_end..match_result.start]);
+            try results.append(self.allocator, text[last_end..mr.start]);
             count += 1;
-
-            last_end = match_result.end;
-            pos = match_result.end;
-
-            if (match_result.start == match_result.end) {
-                pos += 1;
-            }
+            last_end = mr.end;
         }
 
-        // Append remaining text (including empty string)
         try results.append(self.allocator, text[last_end..]);
-
         return results;
     }
 };

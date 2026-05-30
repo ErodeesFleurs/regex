@@ -52,11 +52,11 @@ pub const NodeType = enum {
 
 pub const AstNode = struct {
     type: NodeType,
-    value: ?usize, // for Literal (char cast), Quantifier (min), Backref (group_idx)
-    left: ?*AstNode, // left subtree
-    right: ?*AstNode, // right subtree
-    char_class: ?CharClass, // for CharClass
-    group_index: ?usize, // for Group
+    value: ?usize = null, // for Literal (char cast), Quantifier (min), Backref (group_idx)
+    left: ?*AstNode = null, // left subtree
+    right: ?*AstNode = null, // right subtree
+    char_class: ?CharClass = null, // for CharClass
+    group_index: ?usize = null, // for Group
     group_name: ?[]const u8 = null, // for named capturing group
     options: ?RegexOptions = null, // for InlineFlag
     char_class_transferred: bool = false, // whether char_class has been transferred to bytecode
@@ -113,6 +113,10 @@ pub const CharClass = struct {
     unicode_properties: std.ArrayList(UnicodePropEntry),
     negated: bool,
     allocator: std.mem.Allocator,
+    // Cached flags to avoid recomputing on every match
+    has_ranges_or_posix: bool = false,
+    has_unicode_ranges: bool = false,
+    has_unicode_props: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, negated: bool) CharClass {
         return .{
@@ -122,6 +126,9 @@ pub const CharClass = struct {
             .unicode_properties = .empty,
             .negated = negated,
             .allocator = allocator,
+            .has_ranges_or_posix = false,
+            .has_unicode_ranges = false,
+            .has_unicode_props = false,
         };
     }
 
@@ -141,20 +148,24 @@ pub const CharClass = struct {
 
     pub fn addRange(self: *CharClass, start: u8, end: u8) !void {
         try self.ranges.append(self.allocator, .{ .start = start, .end = end });
+        self.has_ranges_or_posix = true;
     }
 
     pub fn addUnicodeRange(self: *CharClass, start: u21, end: u21) !void {
         try self.unicode_ranges.append(self.allocator, .{ .start = start, .end = end });
+        self.has_unicode_ranges = true;
     }
 
     pub fn addPosixClass(self: *CharClass, name: []const u8) !void {
         const copy = try self.allocator.dupe(u8, name);
         try self.posix_classes.append(self.allocator, copy);
+        self.has_ranges_or_posix = true;
     }
 
     pub fn addUnicodeProperty(self: *CharClass, name: []const u8, negated_prop: bool) !void {
         const copy = try self.allocator.dupe(u8, name);
         try self.unicode_properties.append(self.allocator, .{ .name = copy, .negated = negated_prop });
+        self.has_unicode_props = true;
     }
 
     pub fn contains(self: CharClass, ch: u8) bool {
@@ -285,14 +296,7 @@ pub const Parser = struct {
 
     fn createSimpleNode(self: *Parser, node_type: NodeType) !*AstNode {
         const node = try self.allocator.create(AstNode);
-        node.* = .{
-            .type = node_type,
-            .value = null,
-            .left = null,
-            .right = null,
-            .char_class = null,
-            .group_index = null,
-        };
+        node.* = .{ .type = node_type };
         return node;
     }
 
@@ -309,14 +313,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         };
         const node = try self.allocator.create(AstNode);
-        node.* = .{
-            .type = node_type,
-            .value = null,
-            .left = inner,
-            .right = null,
-            .char_class = null,
-            .group_index = group_idx,
-        };
+        node.* = .{ .type = node_type, .left = inner, .group_index = group_idx };
         return node;
     }
 
@@ -362,14 +359,7 @@ pub const Parser = struct {
             }
 
             const node = try self.allocator.create(AstNode);
-            node.* = .{
-                .type = .Alternate,
-                .value = null,
-                .left = left,
-                .right = right,
-                .char_class = null,
-                .group_index = null,
-            };
+            node.* = .{ .type = .Alternate, .left = left, .right = right };
 
             left = node;
         }
@@ -385,14 +375,7 @@ pub const Parser = struct {
             const right = try self.parseFactor() orelse break;
 
             const node = try self.allocator.create(AstNode);
-            node.* = .{
-                .type = .Concat,
-                .value = null,
-                .left = left,
-                .right = right,
-                .char_class = null,
-                .group_index = null,
-            };
+            node.* = .{ .type = .Concat, .left = left, .right = right };
 
             left = node;
         }
@@ -416,12 +399,12 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 if (next == .Question) {
                     _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .LazyStar, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .LazyStar, .left = primary };
                 } else if (next == .Plus) {
                     _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .PossessiveStar, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .PossessiveStar, .left = primary };
                 } else {
-                    node.* = .{ .type = .Star, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .Star, .left = primary };
                 }
                 return node;
             },
@@ -431,12 +414,12 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 if (next == .Question) {
                     _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .LazyPlus, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .LazyPlus, .left = primary };
                 } else if (next == .Plus) {
                     _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .PossessivePlus, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .PossessivePlus, .left = primary };
                 } else {
-                    node.* = .{ .type = .Plus, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .Plus, .left = primary };
                 }
                 return node;
             },
@@ -446,12 +429,12 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 if (next == .Question) {
                     _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .LazyQuestion, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .LazyQuestion, .left = primary };
                 } else if (next == .Plus) {
                     _ = self.tokenizer.nextToken();
-                    node.* = .{ .type = .PossessiveQuestion, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .PossessiveQuestion, .left = primary };
                 } else {
-                    node.* = .{ .type = .Question, .value = null, .left = primary, .right = null, .char_class = null, .group_index = null };
+                    node.* = .{ .type = .Question, .left = primary };
                 }
                 return node;
             },
@@ -554,8 +537,6 @@ pub const Parser = struct {
             .type = .Quantifier,
             .value = min,
             .left = primary,
-            .right = null,
-            .char_class = null,
             .group_index = max,
         };
         return node;

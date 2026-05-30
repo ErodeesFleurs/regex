@@ -61,8 +61,8 @@ test "boundary: zero-width match find" {
     if (result) |*r| {
         defer r.deinit();
         try std.testing.expect(r.matched);
-        try std.testing.expectEqual(@as(usize, 0), r.start);
-        try std.testing.expectEqual(@as(usize, 0), r.end);
+        try std.testing.expectEqual(0, r.start);
+        try std.testing.expectEqual(0, r.end);
     } else {
         try std.testing.expect(false);
     }
@@ -145,7 +145,7 @@ test "boundary: split empty match" {
     var parts = try re.splitLimit("ab", 2);
     defer parts.deinit(allocator);
     // Empty pattern matches at position 0, then between chars, then at end
-    try std.testing.expectEqual(@as(usize, 3), parts.items.len);
+    try std.testing.expectEqual(3, parts.items.len);
     try std.testing.expectEqualStrings("", parts.items[0]);
     try std.testing.expectEqualStrings("a", parts.items[1]);
     try std.testing.expectEqualStrings("b", parts.items[2]);
@@ -204,7 +204,7 @@ test "boundary: findAll no matches" {
         for (results.items) |*r| r.deinit();
         results.deinit(allocator);
     }
-    try std.testing.expectEqual(@as(usize, 0), results.items.len);
+    try std.testing.expectEqual(0, results.items.len);
 }
 
 test "boundary: backref empty capture" {

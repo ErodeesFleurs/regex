@@ -102,8 +102,8 @@ test "options: unicode case insensitive find" {
     if (result) |*r| {
         defer r.deinit();
         try std.testing.expect(r.matched);
-        try std.testing.expectEqual(@as(usize, 4), r.start);
-        try std.testing.expectEqual(@as(usize, 10), r.end);
+        try std.testing.expectEqual(4, r.start);
+        try std.testing.expectEqual(10, r.end);
     } else {
         try std.testing.expect(false);
     }
@@ -223,8 +223,8 @@ test "exec: match from position" {
     var result2 = try re.exec("hello world", 6);
     defer result2.deinit();
     try std.testing.expect(result2.matched);
-    try std.testing.expectEqual(@as(usize, 6), result2.start);
-    try std.testing.expectEqual(@as(usize, 11), result2.end);
+    try std.testing.expectEqual(6, result2.start);
+    try std.testing.expectEqual(11, result2.end);
 }
 
 test "exec: match with captures from position" {
@@ -235,8 +235,8 @@ test "exec: match with captures from position" {
     var result = try re.exec("hello world foo bar", 6);
     defer result.deinit();
     try std.testing.expect(result.matched);
-    try std.testing.expectEqual(@as(usize, 6), result.start);
-    try std.testing.expectEqual(@as(usize, 15), result.end);
+    try std.testing.expectEqual(6, result.start);
+    try std.testing.expectEqual(15, result.end);
 }
 
 test "exec: no match beyond end" {

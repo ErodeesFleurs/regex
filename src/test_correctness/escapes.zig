@@ -132,8 +132,8 @@ test "escape: \\K reset match start" {
     try std.testing.expect(result != null);
     try std.testing.expect(result.?.matched);
     // \\K resets match start to position 3 (after "foo")
-    try std.testing.expectEqual(@as(usize, 3), result.?.start);
-    try std.testing.expectEqual(@as(usize, 6), result.?.end);
+    try std.testing.expectEqual(3, result.?.start);
+    try std.testing.expectEqual(6, result.?.end);
     try std.testing.expectEqualStrings("bar", result.?.getGroup("foobar", 0).?);
 }
 
@@ -148,8 +148,8 @@ test "escape: \\K with capture" {
     try std.testing.expect(result != null);
     try std.testing.expect(result.?.matched);
     // Full match starts after \\K
-    try std.testing.expectEqual(@as(usize, 3), result.?.start);
-    try std.testing.expectEqual(@as(usize, 6), result.?.end);
+    try std.testing.expectEqual(3, result.?.start);
+    try std.testing.expectEqual(6, result.?.end);
     // Group 1 still captures "foo"
     try std.testing.expectEqualStrings("foo", result.?.getGroup("foobar", 1).?);
     // Group 2 captures "bar"

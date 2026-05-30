@@ -63,8 +63,8 @@ test "literal: substring via find" {
     if (result) |*r| {
         defer r.deinit();
         try std.testing.expect(r.matched);
-        try std.testing.expectEqual(@as(usize, 2), r.start);
-        try std.testing.expectEqual(@as(usize, 5), r.end);
+        try std.testing.expectEqual(2, r.start);
+        try std.testing.expectEqual(5, r.end);
     } else {
         try std.testing.expect(false);
     }

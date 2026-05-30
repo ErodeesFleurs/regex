@@ -35,8 +35,8 @@ test "stress: overlapping patterns" {
     var result = try regex.find(allocator, "aa", "aaaa");
     if (result) |*r| {
         defer r.deinit();
-        try std.testing.expectEqual(@as(usize, 0), r.start);
-        try std.testing.expectEqual(@as(usize, 2), r.end);
+        try std.testing.expectEqual(0, r.start);
+        try std.testing.expectEqual(2, r.end);
     } else {
         try std.testing.expect(false);
     }

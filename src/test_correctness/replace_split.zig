@@ -16,7 +16,7 @@ fn expectSplitLen(allocator: std.mem.Allocator, pattern: []const u8, text: []con
     defer re.deinit();
     var parts = try re.split(text);
     defer parts.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, expected_len), parts.items.len);
+    try std.testing.expectEqual(expected_len, parts.items.len);
 }
 
 test "replace: simple literal" {
@@ -120,7 +120,7 @@ test "split: limit 1" {
     defer re.deinit();
     var parts = try re.splitLimit("a,b,c", 1);
     defer parts.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 2), parts.items.len);
+    try std.testing.expectEqual(2, parts.items.len);
     try std.testing.expectEqualStrings("a", parts.items[0]);
     try std.testing.expectEqualStrings("b,c", parts.items[1]);
 }
@@ -131,7 +131,7 @@ test "split: limit 2" {
     defer re.deinit();
     var parts = try re.splitLimit("a,b,c,d", 2);
     defer parts.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 3), parts.items.len);
+    try std.testing.expectEqual(3, parts.items.len);
     try std.testing.expectEqualStrings("a", parts.items[0]);
     try std.testing.expectEqualStrings("b", parts.items[1]);
     try std.testing.expectEqualStrings("c,d", parts.items[2]);
@@ -143,7 +143,7 @@ test "split: limit zero" {
     defer re.deinit();
     var parts = try re.splitLimit("a,b,c", 0);
     defer parts.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), parts.items.len);
+    try std.testing.expectEqual(1, parts.items.len);
     try std.testing.expectEqualStrings("a,b,c", parts.items[0]);
 }
 
@@ -153,7 +153,7 @@ test "split: limit greater than matches" {
     defer re.deinit();
     var parts = try re.splitLimit("a,b", 10);
     defer parts.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 2), parts.items.len);
+    try std.testing.expectEqual(2, parts.items.len);
     try std.testing.expectEqualStrings("a", parts.items[0]);
     try std.testing.expectEqualStrings("b", parts.items[1]);
 }
