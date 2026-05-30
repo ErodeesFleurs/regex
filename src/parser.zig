@@ -50,43 +50,110 @@ pub const NodeType = enum {
     Empty, // empty expression
 };
 
-pub const AstNode = struct {
-    type: NodeType,
-    value: ?usize = null, // for Literal (char cast), Quantifier (min), Backref (group_idx)
-    left: ?*AstNode = null, // left subtree
-    right: ?*AstNode = null, // right subtree
-    char_class: ?CharClass = null, // for CharClass
-    group_index: ?usize = null, // for Group
-    group_name: ?[]const u8 = null, // for named capturing group
-    options: ?RegexOptions = null, // for InlineFlag
-    char_class_transferred: bool = false, // whether char_class has been transferred to bytecode
-    unicode_property: ?[]const u8 = null, // for UnicodeProperty
-    unicode_negated: bool = false, // for UnicodeProperty
-    condition: ?*AstNode = null, // for Conditional (lookahead/lookbehind condition)
+pub const AstNode = union(NodeType) {
+    Literal: u21,
+    Concat: struct { left: *AstNode, right: *AstNode },
+    Alternate: struct { left: *AstNode, right: *AstNode },
+    Star: *AstNode,
+    Plus: *AstNode,
+    Question: *AstNode,
+    Quantifier: struct { min: usize, max: ?usize, operand: *AstNode },
+    LazyStar: *AstNode,
+    LazyPlus: *AstNode,
+    LazyQuestion: *AstNode,
+    LazyQuantifier: struct { min: usize, max: ?usize, operand: *AstNode },
+    PossessiveStar: *AstNode,
+    PossessivePlus: *AstNode,
+    PossessiveQuestion: *AstNode,
+    PossessiveQuantifier: struct { min: usize, max: ?usize, operand: *AstNode },
+    Group: struct { index: ?usize, name: ?[]const u8, inner: *AstNode },
+    Any: void,
+    CharClass: struct { class: CharClass, transferred: bool },
+    AssertStart: void,
+    AssertEnd: void,
+    AssertStringStart: void,
+    AssertStringEnd: void,
+    AssertStringEndAllowNewline: void,
+    AssertMatchStart: void,
+    AssertForward: *AstNode,
+    AssertForwardNegative: *AstNode,
+    AssertBackward: *AstNode,
+    AssertBackwardNegative: *AstNode,
+    InlineFlag: struct { flags: ?usize, options: ?RegexOptions, inner: ?*AstNode },
+    AtomicGroup: *AstNode,
+    Backref: usize,
+    WordBoundary: void,
+    NotWordBoundary: void,
+    UnicodeProperty: struct { property: []const u8, negated: bool },
+    NotUnicodeProperty: struct { property: []const u8, negated: bool },
+    GraphemeCluster: void,
+    Conditional: struct { condition: ?*AstNode, yes: *AstNode, no: ?*AstNode, group_idx: ?usize },
+    SubroutineCall: usize,
+    Newline: void,
+    ResetMatchStart: void,
+    NotNewline: void,
+    NotVerticalWhitespace: void,
+    Empty: void,
 
     pub fn deinit(self: *AstNode, allocator: std.mem.Allocator) void {
-        if (self.group_name) |name| {
-            allocator.free(name);
-        }
-        if (self.unicode_property) |prop| {
-            allocator.free(prop);
-        }
-        if (self.condition) |cond| {
-            cond.deinit(allocator);
-            allocator.destroy(cond);
-        }
-        if (self.left) |left| {
-            left.deinit(allocator);
-            allocator.destroy(left);
-        }
-        if (self.right) |right| {
-            right.deinit(allocator);
-            allocator.destroy(right);
-        }
-        if (self.char_class) |*cc| {
-            if (!self.char_class_transferred) {
-                cc.deinit();
-            }
+        switch (self.*) {
+            .Literal, .Any, .AssertStart, .AssertEnd, .AssertStringStart, .AssertStringEnd, .AssertStringEndAllowNewline, .AssertMatchStart, .WordBoundary, .NotWordBoundary, .GraphemeCluster, .Newline, .ResetMatchStart, .NotNewline, .NotVerticalWhitespace, .Empty, .Backref, .SubroutineCall => {},
+            .Concat => |b| {
+                b.left.deinit(allocator);
+                allocator.destroy(b.left);
+                b.right.deinit(allocator);
+                allocator.destroy(b.right);
+            },
+            .Alternate => |b| {
+                b.left.deinit(allocator);
+                allocator.destroy(b.left);
+                b.right.deinit(allocator);
+                allocator.destroy(b.right);
+            },
+            .Star, .Plus, .Question, .LazyStar, .LazyPlus, .LazyQuestion, .PossessiveStar, .PossessivePlus, .PossessiveQuestion, .AssertForward, .AssertForwardNegative, .AssertBackward, .AssertBackwardNegative, .AtomicGroup => |child| {
+                child.deinit(allocator);
+                allocator.destroy(child);
+            },
+            .Quantifier => |q| {
+                q.operand.deinit(allocator);
+                allocator.destroy(q.operand);
+            },
+            .LazyQuantifier => |q| {
+                q.operand.deinit(allocator);
+                allocator.destroy(q.operand);
+            },
+            .PossessiveQuantifier => |q| {
+                q.operand.deinit(allocator);
+                allocator.destroy(q.operand);
+            },
+            .Group => |g| {
+                if (g.name) |name| allocator.free(name);
+                g.inner.deinit(allocator);
+                allocator.destroy(g.inner);
+            },
+            .CharClass => |*cc| {
+                if (!cc.transferred) cc.class.deinit();
+            },
+            .InlineFlag => |f| {
+                if (f.inner) |inner| {
+                    inner.deinit(allocator);
+                    allocator.destroy(inner);
+                }
+            },
+            .UnicodeProperty => |p| allocator.free(p.property),
+            .NotUnicodeProperty => |p| allocator.free(p.property),
+            .Conditional => |c| {
+                if (c.condition) |cond| {
+                    cond.deinit(allocator);
+                    allocator.destroy(cond);
+                }
+                c.yes.deinit(allocator);
+                allocator.destroy(c.yes);
+                if (c.no) |no| {
+                    no.deinit(allocator);
+                    allocator.destroy(no);
+                }
+            },
         }
     }
 };
@@ -385,14 +452,13 @@ pub const Parser = struct {
         return try self.createSimpleNode(.Empty);
     }
 
-    fn createSimpleNode(self: *Parser, node_type: NodeType) !*AstNode {
+    fn createSimpleNode(self: *Parser, comptime node_type: NodeType) !*AstNode {
         const node = try self.allocator.create(AstNode);
-        node.* = .{ .type = node_type };
+        node.* = @unionInit(AstNode, @tagName(node_type), {});
         return node;
     }
 
-    /// Parse a group body and return an AST node with the given type.
-    fn parseGroupNode(self: *Parser, node_type: NodeType, group_idx: ?usize) ParserError!*AstNode {
+    fn parseGroupBody(self: *Parser) ParserError!*AstNode {
         const inner = try self.parseExpression() orelse {
             self.setErrorAtToken("Empty group", self.tokenizer.peek());
             return error.EmptyGroup;
@@ -403,9 +469,7 @@ pub const Parser = struct {
             self.allocator.destroy(inner);
             return error.UnexpectedToken;
         };
-        const node = try self.allocator.create(AstNode);
-        node.* = .{ .type = node_type, .left = inner, .group_index = group_idx };
-        return node;
+        return inner;
     }
 
     pub fn parse(self: *Parser) !?*AstNode {
@@ -450,7 +514,7 @@ pub const Parser = struct {
             }
 
             const node = try self.allocator.create(AstNode);
-            node.* = .{ .type = .Alternate, .left = left, .right = right };
+            node.* = .{ .Alternate = .{ .left = left, .right = right.? } };
 
             left = node;
         }
@@ -466,7 +530,7 @@ pub const Parser = struct {
             const right = try self.parseFactor() orelse break;
 
             const node = try self.allocator.create(AstNode);
-            node.* = .{ .type = .Concat, .left = left, .right = right };
+            node.* = .{ .Concat = .{ .left = left, .right = right } };
 
             left = node;
         }
@@ -474,17 +538,17 @@ pub const Parser = struct {
         return left;
     }
 
-    fn makeQuantifierNode(self: *Parser, primary: *AstNode, base: NodeType, lazy: NodeType, possessive: NodeType) !*AstNode {
+    fn makeQuantifierNode(self: *Parser, primary: *AstNode, comptime base: NodeType, comptime lazy: NodeType, comptime possessive: NodeType) !*AstNode {
         const next = self.tokenizer.peek().type;
         const node = try self.allocator.create(AstNode);
         if (next == .Question) {
             _ = self.tokenizer.nextToken();
-            node.* = .{ .type = lazy, .left = primary };
+            node.* = @unionInit(AstNode, @tagName(lazy), primary);
         } else if (next == .Plus) {
             _ = self.tokenizer.nextToken();
-            node.* = .{ .type = possessive, .left = primary };
+            node.* = @unionInit(AstNode, @tagName(possessive), primary);
         } else {
-            node.* = .{ .type = base, .left = primary };
+            node.* = @unionInit(AstNode, @tagName(base), primary);
         }
         return node;
     }
@@ -514,13 +578,14 @@ pub const Parser = struct {
             .LBrace => {
                 const qnode = try self.parseQuantifier(primary);
                 if (qnode) |qn| {
+                    const q = qn.Quantifier;
                     const next = self.tokenizer.peek().type;
                     if (next == .Question) {
                         _ = self.tokenizer.nextToken();
-                        qn.type = .LazyQuantifier;
+                        qn.* = .{ .LazyQuantifier = .{ .min = q.min, .max = q.max, .operand = q.operand } };
                     } else if (next == .Plus) {
                         _ = self.tokenizer.nextToken();
-                        qn.type = .PossessiveQuantifier;
+                        qn.* = .{ .PossessiveQuantifier = .{ .min = q.min, .max = q.max, .operand = q.operand } };
                     }
                 }
                 return qnode;
@@ -606,12 +671,7 @@ pub const Parser = struct {
 
         // Create quantifier node
         const node = try self.allocator.create(AstNode);
-        node.* = .{
-            .type = .Quantifier,
-            .value = min,
-            .left = primary,
-            .group_index = max,
-        };
+        node.* = .{ .Quantifier = .{ .min = min, .max = max, .operand = primary } };
         return node;
     }
 
@@ -730,7 +790,7 @@ pub const Parser = struct {
             else => unreachable,
         };
         try cc.addShorthandClass(shorthand);
-        node.* = .{ .type = .CharClass, .char_class = cc };
+        node.* = .{ .CharClass = .{ .class = cc, .transferred = false } };
         return node;
     }
 
@@ -742,17 +802,12 @@ pub const Parser = struct {
             .Literal => {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .Literal,
-                    .value = @intCast(parseEscapeValue(token.value)),
-                };
+                node.* = .{ .Literal = @intCast(parseEscapeValue(token.value)) };
                 return node;
             },
             .Dot => {
                 _ = self.tokenizer.nextToken();
-                const node = try self.allocator.create(AstNode);
-                node.* = .{ .type = .Any };
-                return node;
+                return try self.createSimpleNode(.Any);
             },
             .Digit, .NotDigit, .Word, .NotWord, .Whitespace, .NotWhitespace, .HorizontalWhitespace, .NotHorizontalWhitespace => {
                 _ = self.tokenizer.nextToken();
@@ -761,9 +816,11 @@ pub const Parser = struct {
             .WordBoundary, .NotWordBoundary => {
                 _ = self.tokenizer.nextToken();
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = if (token.type == .WordBoundary) .WordBoundary else .NotWordBoundary,
-                };
+                if (token.type == .WordBoundary) {
+                    node.* = .WordBoundary;
+                } else {
+                    node.* = .NotWordBoundary;
+                }
                 return node;
             },
             .UnicodeProperty, .NotUnicodeProperty => {
@@ -771,11 +828,12 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AstNode);
                 const prop_name = token.value[3 .. token.value.len - 1];
                 const prop_copy = try self.allocator.dupe(u8, prop_name);
-                node.* = .{
-                    .type = if (token.type == .UnicodeProperty) .UnicodeProperty else .NotUnicodeProperty,
-                    .unicode_property = prop_copy,
-                    .unicode_negated = token.type == .NotUnicodeProperty,
-                };
+                const negated = token.type == .NotUnicodeProperty;
+                if (negated) {
+                    node.* = .{ .NotUnicodeProperty = .{ .property = prop_copy, .negated = true } };
+                } else {
+                    node.* = .{ .UnicodeProperty = .{ .property = prop_copy, .negated = false } };
+                }
                 return node;
             },
             .LParen => {
@@ -788,20 +846,14 @@ pub const Parser = struct {
                 _ = self.tokenizer.nextToken();
                 const group_idx = try std.fmt.parseInt(usize, token.value[1..], 10);
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .Backref,
-                    .value = group_idx,
-                };
+                node.* = .{ .Backref = group_idx };
                 return node;
             },
             .NamedBackref => {
                 _ = self.tokenizer.nextToken();
                 const group_idx = try self.parseNamedBackrefValue(token);
                 const node = try self.allocator.create(AstNode);
-                node.* = .{
-                    .type = .Backref,
-                    .value = group_idx,
-                };
+                node.* = .{ .Backref = group_idx };
                 return node;
             },
             .GraphemeCluster => {
@@ -960,14 +1012,7 @@ pub const Parser = struct {
         }
 
         const node = try self.allocator.create(AstNode);
-        node.* = .{
-            .type = .CharClass,
-            .value = null,
-            .left = null,
-            .right = null,
-            .char_class = cc,
-            .group_index = null,
-        };
+        node.* = .{ .CharClass = .{ .class = cc, .transferred = false } };
         return node;
     }
 
@@ -1075,7 +1120,7 @@ pub const Parser = struct {
                     return error.UnexpectedToken;
                 };
                 const node = try self.allocator.create(AstNode);
-                node.* = .{ .type = .Group, .left = inner };
+                node.* = .{ .Group = .{ .index = null, .name = null, .inner = inner } };
                 return node;
             }
 
@@ -1094,19 +1139,40 @@ pub const Parser = struct {
             _ = self.tokenizer.nextToken(); // consume special
             if (special.type == .Literal and special.value.len == 1) {
                 switch (special.value[0]) {
-                    ':' => return try self.parseGroupNode(.Group, null),
-                    '=' => return try self.parseGroupNode(.AssertForward, null),
-                    '!' => return try self.parseGroupNode(.AssertForwardNegative, null),
+                    ':' => {
+                        const inner = try self.parseGroupBody();
+                        const node = try self.allocator.create(AstNode);
+                        node.* = .{ .Group = .{ .index = null, .name = null, .inner = inner } };
+                        return node;
+                    },
+                    '=' => {
+                        const inner = try self.parseGroupBody();
+                        const node = try self.allocator.create(AstNode);
+                        node.* = .{ .AssertForward = inner };
+                        return node;
+                    },
+                    '!' => {
+                        const inner = try self.parseGroupBody();
+                        const node = try self.allocator.create(AstNode);
+                        node.* = .{ .AssertForwardNegative = inner };
+                        return node;
+                    },
                     '<' => {
                         // Check if lookbehind (?<=...), (?<!...) or named capture group (?<name>...)
                         const next = self.tokenizer.peek();
                         if (next.type == .Literal and next.value.len == 1) {
                             if (next.value[0] == '=') {
                                 _ = self.tokenizer.nextToken(); // consume '='
-                                return try self.parseGroupNode(.AssertBackward, null);
+                                const inner = try self.parseGroupBody();
+                                const node = try self.allocator.create(AstNode);
+                                node.* = .{ .AssertBackward = inner };
+                                return node;
                             } else if (next.value[0] == '!') {
                                 _ = self.tokenizer.nextToken(); // consume '!'
-                                return try self.parseGroupNode(.AssertBackwardNegative, null);
+                                const inner = try self.parseGroupBody();
+                                const node = try self.allocator.create(AstNode);
+                                node.* = .{ .AssertBackwardNegative = inner };
+                                return node;
                             }
                         }
                         // Named capture group (?<name>...)
@@ -1125,7 +1191,12 @@ pub const Parser = struct {
                     'i', 'm', 's', 'x' => {
                         return try self.parseInlineFlagGroup(special);
                     },
-                    '>' => return try self.parseGroupNode(.AtomicGroup, null),
+                    '>' => {
+                        const inner = try self.parseGroupBody();
+                        const node = try self.allocator.create(AstNode);
+                        node.* = .{ .AtomicGroup = inner };
+                        return node;
+                    },
                     else => {
                         self.setErrorAtToken("Unexpected token in group", special);
                         return error.UnexpectedToken;
@@ -1138,7 +1209,10 @@ pub const Parser = struct {
             // Ordinary capturing group
             self.group_counter += 1;
             const group_index = self.group_counter;
-            return self.parseGroupNode(.Group, group_index);
+            const inner = try self.parseGroupBody();
+            const node = try self.allocator.create(AstNode);
+            node.* = .{ .Group = .{ .index = group_index, .name = null, .inner = inner } };
+            return node;
         }
     }
 
@@ -1168,10 +1242,11 @@ pub const Parser = struct {
                         return error.UnexpectedToken;
                     };
                     const assert_node = try self.allocator.create(AstNode);
-                    assert_node.* = .{
-                        .type = if (look_ch == '=') .AssertForward else .AssertForwardNegative,
-                        .left = inner,
-                    };
+                    if (look_ch == '=') {
+                        assert_node.* = .{ .AssertForward = inner };
+                    } else {
+                        assert_node.* = .{ .AssertForwardNegative = inner };
+                    }
                     cond_node = assert_node;
                 } else if (look_ch == '<') {
                     _ = self.tokenizer.nextToken(); // consume '<'
@@ -1189,10 +1264,11 @@ pub const Parser = struct {
                                 return error.UnexpectedToken;
                             };
                             const assert_node = try self.allocator.create(AstNode);
-                            assert_node.* = .{
-                                .type = if (lt_ch == '=') .AssertBackward else .AssertBackwardNegative,
-                                .left = inner,
-                            };
+                            if (lt_ch == '=') {
+                                assert_node.* = .{ .AssertBackward = inner };
+                            } else {
+                                assert_node.* = .{ .AssertBackwardNegative = inner };
+                            }
                             cond_node = assert_node;
                         }
                     }
@@ -1251,13 +1327,7 @@ pub const Parser = struct {
         };
 
         const node = try self.allocator.create(AstNode);
-        node.* = .{
-            .type = .Conditional,
-            .value = if (is_group_condition) group_idx else null,
-            .left = yes_branch,
-            .right = no_branch,
-            .condition = cond_node,
-        };
+        node.* = .{ .Conditional = .{ .condition = cond_node, .yes = yes_branch, .no = no_branch, .group_idx = if (is_group_condition) group_idx else null } };
         return node;
     }
 
@@ -1340,12 +1410,7 @@ pub const Parser = struct {
                 self.tokenizer.free_spacing = old_free_spacing;
             }
             const node = try self.allocator.create(AstNode);
-            node.* = .{
-                .type = .InlineFlag,
-                .value = flag_bits,
-                .left = inner,
-                .options = opts,
-            };
+            node.* = .{ .InlineFlag = .{ .flags = flag_bits, .options = opts, .inner = inner } };
             return node;
         } else if (next.type == .RParen) {
             // Global flag (?i)
@@ -1354,11 +1419,7 @@ pub const Parser = struct {
                 self.tokenizer.free_spacing = true;
             }
             const node = try self.allocator.create(AstNode);
-            node.* = .{
-                .type = .InlineFlag,
-                .value = flag_bits,
-                .options = opts,
-            };
+            node.* = .{ .InlineFlag = .{ .flags = flag_bits, .options = opts, .inner = null } };
             return node;
         } else {
             self.setErrorAtToken("Unexpected token: expected ':' or ')'", next);
@@ -1413,10 +1474,7 @@ pub const Parser = struct {
                 return error.UnexpectedToken;
             };
             const node = try self.allocator.create(AstNode);
-            node.* = .{
-                .type = .SubroutineCall,
-                .value = subroutine_group,
-            };
+            node.* = .{ .SubroutineCall = subroutine_group };
             return node;
         }
         return null;
@@ -1467,13 +1525,7 @@ pub const Parser = struct {
         };
 
         const node = try self.allocator.create(AstNode);
-        node.* = .{
-            .type = .Group,
-            .left = inner,
-            .group_index = group_index,
-            .group_name = name,
-        };
-
+        node.* = .{ .Group = .{ .index = group_index, .name = name, .inner = inner } };
         return node;
     }
 };
@@ -1498,8 +1550,8 @@ test "parser literal" {
 
     const ast = try parser.parse();
     try std.testing.expect(ast != null);
-    try std.testing.expectEqual(.Literal, ast.?.type);
-    try std.testing.expectEqual(@as(u8, 'a'), ast.?.value.?);
+    try std.testing.expectEqual(.Literal, @as(NodeType, ast.?.*));
+    try std.testing.expectEqual(@as(u21, 'a'), ast.?.Literal);
 
     ast.?.deinit(allocator);
     allocator.destroy(ast.?);
@@ -1511,9 +1563,9 @@ test "parser concat" {
 
     const ast = try parser.parse();
     try std.testing.expect(ast != null);
-    try std.testing.expectEqual(.Concat, ast.?.type);
-    try std.testing.expectEqual(.Literal, ast.?.left.?.type);
-    try std.testing.expectEqual(.Literal, ast.?.right.?.type);
+    try std.testing.expectEqual(.Concat, @as(NodeType, ast.?.*));
+    try std.testing.expectEqual(.Literal, @as(NodeType, ast.?.Concat.left.*));
+    try std.testing.expectEqual(.Literal, @as(NodeType, ast.?.Concat.right.*));
 
     ast.?.deinit(allocator);
     allocator.destroy(ast.?);
@@ -1525,7 +1577,7 @@ test "parser alternate" {
 
     const ast = try parser.parse();
     try std.testing.expect(ast != null);
-    try std.testing.expectEqual(.Alternate, ast.?.type);
+    try std.testing.expectEqual(.Alternate, @as(NodeType, ast.?.*));
 
     ast.?.deinit(allocator);
     allocator.destroy(ast.?);
@@ -1537,8 +1589,8 @@ test "parser star" {
 
     const ast = try parser.parse();
     try std.testing.expect(ast != null);
-    try std.testing.expectEqual(.Star, ast.?.type);
-    try std.testing.expectEqual(.Literal, ast.?.left.?.type);
+    try std.testing.expectEqual(.Star, @as(NodeType, ast.?.*));
+    try std.testing.expectEqual(.Literal, @as(NodeType, ast.?.Star.*));
 
     ast.?.deinit(allocator);
     allocator.destroy(ast.?);
@@ -1550,8 +1602,8 @@ test "parser group" {
 
     const ast = try parser.parse();
     try std.testing.expect(ast != null);
-    try std.testing.expectEqual(.Group, ast.?.type);
-    try std.testing.expectEqual(@as(usize, 1), ast.?.group_index.?);
+    try std.testing.expectEqual(.Group, @as(NodeType, ast.?.*));
+    try std.testing.expectEqual(@as(usize, 1), ast.?.Group.index.?);
 
     ast.?.deinit(allocator);
     allocator.destroy(ast.?);
@@ -1563,11 +1615,10 @@ test "parser char class" {
 
     const ast = try parser.parse();
     try std.testing.expect(ast != null);
-    try std.testing.expectEqual(.CharClass, ast.?.type);
-    try std.testing.expect(ast.?.char_class != null);
-    try std.testing.expect(ast.?.char_class.?.contains('a'));
-    try std.testing.expect(ast.?.char_class.?.contains('z'));
-    try std.testing.expect(!ast.?.char_class.?.contains('A'));
+    try std.testing.expectEqual(.CharClass, @as(NodeType, ast.?.*));
+    try std.testing.expect(ast.?.CharClass.class.contains('a'));
+    try std.testing.expect(ast.?.CharClass.class.contains('z'));
+    try std.testing.expect(!ast.?.CharClass.class.contains('A'));
 
     ast.?.deinit(allocator);
     allocator.destroy(ast.?);
@@ -1579,7 +1630,7 @@ test "parser complex" {
 
     const ast = try parser.parse();
     try std.testing.expect(ast != null);
-    try std.testing.expectEqual(.Concat, ast.?.type);
+    try std.testing.expectEqual(.Concat, @as(NodeType, ast.?.*));
 
     ast.?.deinit(allocator);
     allocator.destroy(ast.?);

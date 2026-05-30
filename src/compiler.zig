@@ -10,7 +10,7 @@ const NodeType = @import("parser.zig").NodeType;
 
 /// Return the fixed byte width of a node, or null if variable width.
 fn computeFixedWidth(node: *AstNode) ?usize {
-    switch (node.type) {
+    switch (node.*) {
         .Literal,
         .Any,
         .CharClass,
@@ -37,18 +37,17 @@ fn computeFixedWidth(node: *AstNode) ?usize {
         .Empty,
         .InlineFlag,
         => return 0,
-        .Group,
-        .AtomicGroup,
-        .Conditional,
-        => return if (node.left) |l| computeFixedWidth(l) else 0,
-        .Concat => {
-            const left_width = computeFixedWidth(node.left.?) orelse return null;
-            const right_width = computeFixedWidth(node.right.?) orelse return null;
+        .Group => |g| return computeFixedWidth(g.inner),
+        .AtomicGroup => |child| return computeFixedWidth(child),
+        .Conditional => |c| return computeFixedWidth(c.yes),
+        .Concat => |b| {
+            const left_width = computeFixedWidth(b.left) orelse return null;
+            const right_width = computeFixedWidth(b.right) orelse return null;
             return left_width + right_width;
         },
-        .Alternate => {
-            const left_width = computeFixedWidth(node.left.?);
-            const right_width = computeFixedWidth(node.right.?);
+        .Alternate => |b| {
+            const left_width = computeFixedWidth(b.left);
+            const right_width = computeFixedWidth(b.right);
             if (left_width) |lw| {
                 if (right_width) |rw| {
                     if (lw == rw) return lw;
@@ -66,23 +65,35 @@ fn computeFixedWidth(node: *AstNode) ?usize {
         .LazyQuestion,
         .PossessiveQuestion,
         => return null,
-        .Quantifier,
-        .LazyQuantifier,
-        .PossessiveQuantifier,
-        => {
-            const child_width = computeFixedWidth(node.left.?) orelse return null;
-            const min_count = node.value.?;
-            const max_count = node.group_index;
-            if (max_count) |max| {
-                if (min_count == max) {
-                    return child_width * min_count;
+        .Quantifier => |q| {
+            const child_width = computeFixedWidth(q.operand) orelse return null;
+            if (q.max) |max| {
+                if (q.min == max) {
+                    return child_width * q.min;
                 }
             }
             return null;
         },
-        .Backref,
-        .SubroutineCall,
-        => return null,
+        .LazyQuantifier => |q| {
+            const child_width = computeFixedWidth(q.operand) orelse return null;
+            if (q.max) |max| {
+                if (q.min == max) {
+                    return child_width * q.min;
+                }
+            }
+            return null;
+        },
+        .PossessiveQuantifier => |q| {
+            const child_width = computeFixedWidth(q.operand) orelse return null;
+            if (q.max) |max| {
+                if (q.min == max) {
+                    return child_width * q.min;
+                }
+            }
+            return null;
+        },
+        .Backref => return null,
+        .SubroutineCall => return null,
     }
 }
 
@@ -164,19 +175,15 @@ pub const Compiler = struct {
     }
 
     fn compileNode(self: *Compiler, node: *AstNode) !void {
-        switch (node.type) {
-            .Literal => {
-                const value = node.value.?;
+        switch (node.*) {
+            .Literal => |value| {
                 if (!self.options.case_sensitive and value > 127) {
-                    // For case-insensitive mode with non-ASCII characters, use CharUtf8
                     _ = try self.bytecode.emit(.{ .CharUtf8 = @intCast(value) });
                 } else if (value <= 127) {
                     _ = try self.bytecode.emit(.{ .Char = @intCast(value) });
                 } else {
-                    // Encode Unicode code point > 127 as UTF-8 byte sequence (case-sensitive mode)
                     var buf: [4]u8 = undefined;
                     const len = std.unicode.utf8Encode(@intCast(value), &buf) catch {
-                        // Invalid code point, emit a placeholder
                         _ = try self.bytecode.emit(.{ .Char = '?' });
                         return;
                     };
@@ -186,59 +193,45 @@ pub const Compiler = struct {
                 }
             },
             .Any => try self.emitOp(.Any),
-            .CharClass => {
-                const cc = try self.allocator.create(CharClass);
+            .CharClass => |*cc| {
+                const cc_ptr = try self.allocator.create(CharClass);
                 errdefer {
-                    cc.deinit();
-                    self.allocator.destroy(cc);
+                    cc_ptr.deinit();
+                    self.allocator.destroy(cc_ptr);
                 }
-                if (node.char_class_transferred) {
-                    // Deep copy for additional uses (e.g. quantifier repetition)
-                    cc.* = CharClass.init(self.allocator, node.char_class.?.negated);
-                    for (node.char_class.?.ranges.items) |range| {
-                        try cc.addRange(range.start, range.end);
+                if (cc.transferred) {
+                    cc_ptr.* = CharClass.init(self.allocator, cc.class.negated);
+                    for (cc.class.ranges.items) |range| {
+                        try cc_ptr.addRange(range.start, range.end);
                     }
-                    for (node.char_class.?.posix_classes.items) |name| {
-                        try cc.addPosixClass(name);
+                    for (cc.class.posix_classes.items) |name| {
+                        try cc_ptr.addPosixClass(name);
                     }
-                    for (node.char_class.?.unicode_properties.items) |entry| {
-                        try cc.addUnicodeProperty(entry.name, entry.negated);
+                    for (cc.class.unicode_properties.items) |entry| {
+                        try cc_ptr.addUnicodeProperty(entry.name, entry.negated);
                     }
                 } else {
-                    cc.* = node.char_class.?;
-                    node.char_class_transferred = true;
+                    cc_ptr.* = cc.class;
+                    cc.transferred = true;
                 }
-                _ = try self.bytecode.emit(.{ .CharClass = cc });
+                _ = try self.bytecode.emit(.{ .CharClass = cc_ptr });
             },
-            .Concat => {
-                try self.compileNode(node.left.?);
-                try self.compileNode(node.right.?);
+            .Concat => |b| {
+                try self.compileNode(b.left);
+                try self.compileNode(b.right);
             },
-            .Alternate => {
-                // L1: Split L2, L3
-                //      ...left...
-                //      Jmp L4
-                // L2: ...right...
-                // L3:
-
+            .Alternate => |b| {
                 const split_idx = try self.bytecode.emit(.{ .Split = undefined });
-
-                // Compile left branch
-                try self.compileNode(node.left.?);
+                try self.compileNode(b.left);
                 const jmp_idx = try self.bytecode.emit(.{ .Jmp = undefined });
-
-                // Right branch start position
                 const right_start = self.bytecode.getPC();
                 self.bytecode.patch(split_idx, right_start);
-
-                // Compile right branch
-                try self.compileNode(node.right.?);
-
-                // Jump target position
+                try self.compileNode(b.right);
                 const end_pos = self.bytecode.getPC();
                 self.bytecode.patch(jmp_idx, end_pos);
             },
-            .Star, .LazyStar, .Plus, .LazyPlus, .Question, .LazyQuestion => |tag| {
+            .Star, .LazyStar, .Plus, .LazyPlus, .Question, .LazyQuestion => |child| {
+                const tag = node.*;
                 const min: usize = switch (tag) {
                     .Plus, .LazyPlus => 1,
                     else => 0,
@@ -251,41 +244,28 @@ pub const Compiler = struct {
                     .LazyStar, .LazyPlus, .LazyQuestion => true,
                     else => false,
                 };
-                try self.emitLoop(node.left.?, min, max, lazy);
+                try self.emitLoop(child, min, max, lazy);
             },
-            .Group => {
-                if (node.group_index) |group_idx| {
-                    // Capturing group: emit Save instructions
+            .Group => |g| {
+                if (g.index) |group_idx| {
                     const group_start = self.bytecode.getPC();
                     _ = try self.bytecode.emit(.{ .Save = group_idx * 2 });
-
-                    try self.compileNode(node.left.?);
+                    try self.compileNode(g.inner);
                     const inner_end = self.bytecode.getPC();
-
-                    // SubroutineReturn: returns to caller if entered via SubroutineCall
                     try self.emitOp(.SubroutineReturn);
-
                     _ = try self.bytecode.emit(.{ .Save = group_idx * 2 + 1 });
-
-                    // Record the group start (including Save start) for subroutine calls
                     self.group_ranges.put(group_idx, GroupRange{ .start = group_start, .end = inner_end }) catch {};
-
                     if (group_idx > self.bytecode.num_groups) {
                         self.bytecode.num_groups = group_idx;
                     }
                 } else {
-                    // Non-capturing group: compile inner only, no Save instructions
-                    try self.compileNode(node.left.?);
+                    try self.compileNode(g.inner);
                 }
             },
-            .Quantifier => {
-                try self.compileQuantifier(node, false);
-            },
-            .LazyQuantifier => {
-                try self.compileQuantifier(node, true);
-            },
-            .PossessiveStar, .PossessivePlus, .PossessiveQuestion => |tag| {
-                try self.emitOp(.AtomicStart);
+            .Quantifier => |q| try self.emitLoop(q.operand, q.min, q.max, false),
+            .LazyQuantifier => |q| try self.emitLoop(q.operand, q.min, q.max, true),
+            .PossessiveStar, .PossessivePlus, .PossessiveQuestion => |child| {
+                const tag = node.*;
                 const min: usize = switch (tag) {
                     .PossessivePlus => 1,
                     else => 0,
@@ -294,23 +274,29 @@ pub const Compiler = struct {
                     .PossessiveQuestion => 1,
                     else => null,
                 };
-                try self.emitLoop(node.left.?, min, max, false);
-                try self.emitOp(.AtomicEnd);
-            },
-            .PossessiveQuantifier => {
                 try self.emitOp(.AtomicStart);
-                try self.compileQuantifier(node, false);
+                try self.emitLoop(child, min, max, false);
                 try self.emitOp(.AtomicEnd);
             },
-            .Backref => {
-                _ = try self.bytecode.emit(.{ .Backref = node.value.? });
+            .PossessiveQuantifier => |q| {
+                try self.emitOp(.AtomicStart);
+                try self.emitLoop(q.operand, q.min, q.max, false);
+                try self.emitOp(.AtomicEnd);
+            },
+            .Backref => |group_idx| {
+                _ = try self.bytecode.emit(.{ .Backref = group_idx });
             },
             .WordBoundary => try self.emitOp(.WordBoundary),
             .NotWordBoundary => try self.emitOp(.NotWordBoundary),
-            .UnicodeProperty, .NotUnicodeProperty => {
-                const prop_copy = try self.allocator.dupe(u8, node.unicode_property.?);
+            .UnicodeProperty => |p| {
+                const prop_copy = try self.allocator.dupe(u8, p.property);
                 try self.bytecode.unicode_properties.append(self.allocator, prop_copy);
-                _ = try self.bytecode.emit(.{ .UnicodeProperty = .{ .property = prop_copy, .negated = node.type == .NotUnicodeProperty } });
+                _ = try self.bytecode.emit(.{ .UnicodeProperty = .{ .property = prop_copy, .negated = p.negated } });
+            },
+            .NotUnicodeProperty => |p| {
+                const prop_copy = try self.allocator.dupe(u8, p.property);
+                try self.bytecode.unicode_properties.append(self.allocator, prop_copy);
+                _ = try self.bytecode.emit(.{ .UnicodeProperty = .{ .property = prop_copy, .negated = p.negated } });
             },
             .GraphemeCluster => try self.emitOp(.GraphemeCluster),
             .Newline => try self.emitOp(.Newline),
@@ -324,33 +310,36 @@ pub const Compiler = struct {
             .AssertStringEnd => try self.emitOp(.AssertStringEnd),
             .AssertStringEndAllowNewline => try self.emitOp(.AssertStringEndAllowNewline),
             .AssertMatchStart => try self.emitOp(.AssertMatchStart),
-            .AssertForward, .AssertForwardNegative, .AssertBackward, .AssertBackwardNegative => try self.emitAssertBlock(node),
-            .InlineFlag => {
+            .AssertForward => try self.emitAssertBlock(node),
+            .AssertForwardNegative => try self.emitAssertBlock(node),
+            .AssertBackward => try self.emitAssertBlock(node),
+            .AssertBackwardNegative => try self.emitAssertBlock(node),
+            .InlineFlag => |f| {
                 const old_options = self.options;
                 var new_opts = old_options;
-                if (node.value) |flag_bits| {
-                    if (flag_bits & 1 != 0) new_opts.case_sensitive = node.options.?.case_sensitive;
-                    if (flag_bits & 2 != 0) new_opts.multiline = node.options.?.multiline;
-                    if (flag_bits & 4 != 0) new_opts.dot_matches_newline = node.options.?.dot_matches_newline;
-                    if (flag_bits & 8 != 0) new_opts.free_spacing = node.options.?.free_spacing;
+                if (f.flags) |flag_bits| {
+                    if (f.options) |opts| {
+                        if (flag_bits & 1 != 0) new_opts.case_sensitive = opts.case_sensitive;
+                        if (flag_bits & 2 != 0) new_opts.multiline = opts.multiline;
+                        if (flag_bits & 4 != 0) new_opts.dot_matches_newline = opts.dot_matches_newline;
+                        if (flag_bits & 8 != 0) new_opts.free_spacing = opts.free_spacing;
+                    }
                 }
                 self.options = new_opts;
                 _ = try self.bytecode.emit(.{ .SetOption = new_opts });
-                if (node.left) |inner| {
+                if (f.inner) |inner| {
                     try self.compileNode(inner);
-                    // Restore original options for scoped flag
                     self.options = old_options;
                     _ = try self.bytecode.emit(.{ .SetOption = old_options });
                 }
             },
-            .AtomicGroup => {
+            .AtomicGroup => |child| {
                 try self.emitOp(.AtomicStart);
-                try self.compileNode(node.left.?);
+                try self.compileNode(child);
                 try self.emitOp(.AtomicEnd);
             },
             .Conditional => try self.compileConditional(node),
-            .SubroutineCall => {
-                const group_idx = node.value.?;
+            .SubroutineCall => |group_idx| {
                 _ = try self.bytecode.emit(.{ .SubroutineCall = .{ .group = group_idx, .target = undefined } });
             },
         }
@@ -421,27 +410,27 @@ pub const Compiler = struct {
     }
 
     fn emitAssertBlock(self: *Compiler, node: *AstNode) error{OutOfMemory}!void {
-        switch (node.type) {
-            .AssertForward => {
+        switch (node.*) {
+            .AssertForward => |child| {
                 try self.emitOp(.AssertForward);
-                try self.compileNode(node.left.?);
+                try self.compileNode(child);
                 try self.emitOp(.AssertForwardEnd);
             },
-            .AssertForwardNegative => {
+            .AssertForwardNegative => |child| {
                 try self.emitOp(.AssertForwardNegative);
-                try self.compileNode(node.left.?);
+                try self.compileNode(child);
                 try self.emitOp(.AssertForwardEnd);
             },
-            .AssertBackward => {
-                const width = computeFixedWidth(node.left.?);
+            .AssertBackward => |child| {
+                const width = computeFixedWidth(child);
                 _ = try self.bytecode.emit(.{ .AssertBackward = width });
-                try self.compileNode(node.left.?);
+                try self.compileNode(child);
                 try self.emitOp(.AssertBackwardEnd);
             },
-            .AssertBackwardNegative => {
-                const width = computeFixedWidth(node.left.?);
+            .AssertBackwardNegative => |child| {
+                const width = computeFixedWidth(child);
                 _ = try self.bytecode.emit(.{ .AssertBackwardNegative = width });
-                try self.compileNode(node.left.?);
+                try self.compileNode(child);
                 try self.emitOp(.AssertBackwardEnd);
             },
             else => unreachable,
@@ -449,13 +438,14 @@ pub const Compiler = struct {
     }
 
     fn compileConditional(self: *Compiler, node: *AstNode) error{OutOfMemory}!void {
-        if (node.condition) |cond| {
-            var yes_node = node.left.?;
-            var no_node = node.right;
+        const c = node.Conditional;
+        if (c.condition) |cond| {
+            var yes_node = c.yes;
+            var no_node = c.no;
 
-            if (yes_node.type == .Alternate and no_node == null) {
-                no_node = yes_node.right;
-                yes_node = yes_node.left.?;
+            if (yes_node.* == .Alternate and no_node == null) {
+                no_node = yes_node.Alternate.right;
+                yes_node = yes_node.Alternate.left;
             }
 
             const split_idx = try self.bytecode.emit(.{ .Split = undefined });
@@ -474,17 +464,17 @@ pub const Compiler = struct {
             self.bytecode.patch(jmp_idx, end_pos);
             self.bytecode.patch(split_idx, no_start);
         } else {
-            const group_idx = node.value.?;
+            const group_idx = c.group_idx.?;
             const cond_idx = try self.bytecode.emit(.{ .Conditional = .{ .group = group_idx, .target = undefined } });
 
-            const yes_node = node.left.?;
-            const no_node = node.right;
+            const yes_node = c.yes;
+            const no_node = c.no;
 
-            if (yes_node.type == .Alternate and no_node == null) {
-                try self.compileNode(yes_node.left.?);
+            if (yes_node.* == .Alternate and no_node == null) {
+                try self.compileNode(yes_node.Alternate.left);
                 const jmp_idx = try self.bytecode.emit(.{ .Jmp = undefined });
                 const no_start = self.bytecode.getPC();
-                try self.compileNode(yes_node.right.?);
+                try self.compileNode(yes_node.Alternate.right);
                 const end_pos = self.bytecode.getPC();
                 self.bytecode.patch(cond_idx, no_start);
                 self.bytecode.patch(jmp_idx, end_pos);
@@ -507,9 +497,8 @@ pub const Compiler = struct {
     }
 
     fn compileQuantifier(self: *Compiler, node: *AstNode, lazy: bool) error{OutOfMemory}!void {
-        const min = node.value.?;
-        const max = node.group_index; // reuse group_index field to store max
-        try self.emitLoop(node.left.?, min, max, lazy);
+        const q = node.Quantifier;
+        try self.emitLoop(q.operand, q.min, q.max, lazy);
     }
 
     /// Emit one optional match: Split to operand or past it.
