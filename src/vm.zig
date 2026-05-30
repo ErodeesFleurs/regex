@@ -1861,37 +1861,21 @@ fn matchUnicodeProperty(input: []const u8, pos: usize, property: []const u8, neg
     
     if (pos + byte_len > input.len) {
         const ch = input[pos];
-        const matches = isUnicodeProperty(ch, property);
-        if (negated) {
-            if (matches) return null;
-            return 1;
-        } else {
-            if (!matches) return null;
-            return 1;
-        }
+        return matchPropertyResult(isUnicodeProperty(ch, property), negated, 1);
     }
-    
+
     const cp = std.unicode.utf8Decode(input[pos..pos + byte_len]) catch {
         const ch = input[pos];
-        const matches = isUnicodeProperty(ch, property);
-        if (negated) {
-            if (matches) return null;
-            return 1;
-        } else {
-            if (!matches) return null;
-            return 1;
-        }
+        return matchPropertyResult(isUnicodeProperty(ch, property), negated, 1);
     };
-    
-    const matches = isUnicodeProperty(cp, property);
-    
-    if (negated) {
-        if (matches) return null;
-        return byte_len;
-    } else {
-        if (!matches) return null;
-        return byte_len;
-    }
+
+    return matchPropertyResult(isUnicodeProperty(cp, property), negated, byte_len);
+}
+
+/// Return byte_len if (matches XOR negated), else null.
+fn matchPropertyResult(matches: bool, negated: bool, byte_len: usize) ?usize {
+    if (matches != negated) return byte_len;
+    return null;
 }
 
 /// Check if a character at position `pos` in `input` is a Unicode word character.
