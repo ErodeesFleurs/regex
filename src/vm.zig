@@ -5,6 +5,72 @@ const Instruction = @import("bytecode.zig").Instruction;
 const RegexOptions = @import("options.zig").RegexOptions;
 const unicode_case = @import("unicode_case.zig");
 
+/// Comptime enum of all known Unicode property names.
+const UnicodeProp = enum {
+    L,
+    Lu,
+    Ll,
+    Lt,
+    Lm,
+    Lo,
+    N,
+    Nd,
+    Nl,
+    No,
+    P,
+    Pc,
+    Pd,
+    Ps,
+    Pe,
+    Pi,
+    Pf,
+    Po,
+    S,
+    Sc,
+    Sk,
+    Sm,
+    So,
+    Z,
+    Zs,
+    Zl,
+    Zp,
+    C,
+    Cc,
+    Cf,
+    Co,
+    Cs,
+    M,
+    Mn,
+    Mc,
+    Me,
+    Han,
+    Latin,
+    Greek,
+    Cyrillic,
+    Arabic,
+    Hebrew,
+    Armenian,
+    Georgian,
+    Thai,
+    Devanagari,
+    Hiragana,
+    Katakana,
+    Hangul,
+};
+
+/// Comptime map from property name string to enum value.
+const prop_map = std.StaticStringMap(UnicodeProp).initComptime(&.{
+    .{ "L", .L },               .{ "Lu", .Lu },             .{ "Ll", .Ll },       .{ "Lt", .Lt },                 .{ "Lm", .Lm },             .{ "Lo", .Lo },
+    .{ "N", .N },               .{ "Nd", .Nd },             .{ "Nl", .Nl },       .{ "No", .No },                 .{ "P", .P },               .{ "Pc", .Pc },
+    .{ "Pd", .Pd },             .{ "Ps", .Ps },             .{ "Pe", .Pe },       .{ "Pi", .Pi },                 .{ "Pf", .Pf },             .{ "Po", .Po },
+    .{ "S", .S },               .{ "Sc", .Sc },             .{ "Sk", .Sk },       .{ "Sm", .Sm },                 .{ "So", .So },             .{ "Z", .Z },
+    .{ "Zs", .Zs },             .{ "Zl", .Zl },             .{ "Zp", .Zp },       .{ "C", .C },                   .{ "Cc", .Cc },             .{ "Cf", .Cf },
+    .{ "Co", .Co },             .{ "Cs", .Cs },             .{ "M", .M },         .{ "Mn", .Mn },                 .{ "Mc", .Mc },             .{ "Me", .Me },
+    .{ "Han", .Han },           .{ "Latin", .Latin },       .{ "Greek", .Greek }, .{ "Cyrillic", .Cyrillic },     .{ "Arabic", .Arabic },     .{ "Hebrew", .Hebrew },
+    .{ "Armenian", .Armenian }, .{ "Georgian", .Georgian }, .{ "Thai", .Thai },   .{ "Devanagari", .Devanagari }, .{ "Hiragana", .Hiragana }, .{ "Katakana", .Katakana },
+    .{ "Hangul", .Hangul },
+});
+
 pub const MatchResult = struct {
     matched: bool,
     captures: std.ArrayList(?usize),
@@ -76,16 +142,42 @@ pub const MatchResult = struct {
     }
 };
 
-// Stack frame used for backtracking
+const SENTINEL = std.math.maxInt(usize);
+
+/// Compressed snapshot of mutable regex flags (max_steps never changes at runtime).
+const FlagsSnapshot = packed struct {
+    case_sensitive: bool = true,
+    multiline: bool = false,
+    dot_matches_newline: bool = false,
+    free_spacing: bool = false,
+};
+
+fn snapshotFlags(opts: RegexOptions) FlagsSnapshot {
+    return .{
+        .case_sensitive = opts.case_sensitive,
+        .multiline = opts.multiline,
+        .dot_matches_newline = opts.dot_matches_newline,
+        .free_spacing = opts.free_spacing,
+    };
+}
+
+fn applyFlagsSnapshot(fs: FlagsSnapshot, opts: *RegexOptions) void {
+    opts.case_sensitive = fs.case_sensitive;
+    opts.multiline = fs.multiline;
+    opts.dot_matches_newline = fs.dot_matches_newline;
+    opts.free_spacing = fs.free_spacing;
+}
+
+// Stack frame used for backtracking (~72 bytes on 64-bit, down from ~112)
 const Frame = struct {
     pc: usize,
     pos: usize,
-    capture_slot: ?usize,
-    capture_old_value: ?usize,
-    paired_capture_slot: ?usize = null,
-    paired_capture_old_value: ?usize = null,
-    options: RegexOptions,
-    subroutine_stack_len: usize = 0,
+    capture_slot: usize,
+    capture_old_value: usize,
+    paired_capture_slot: usize,
+    paired_capture_old_value: usize,
+    subroutine_stack_len: usize,
+    options: FlagsSnapshot,
 };
 
 /// Restore state from a backtrack frame, handling both main and sub-match modes.
@@ -100,13 +192,13 @@ fn backtrack(
     subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
     pc.* = frame.pc;
     pos.* = frame.pos;
-    if (frame.capture_slot) |slot| {
-        captures.items[slot] = frame.capture_old_value;
+    if (frame.capture_slot != SENTINEL) {
+        captures.items[frame.capture_slot] = if (frame.capture_old_value == SENTINEL) null else frame.capture_old_value;
     }
-    if (frame.paired_capture_slot) |slot| {
-        captures.items[slot] = frame.paired_capture_old_value;
+    if (frame.paired_capture_slot != SENTINEL) {
+        captures.items[frame.paired_capture_slot] = if (frame.paired_capture_old_value == SENTINEL) null else frame.paired_capture_old_value;
     }
-    options.* = frame.options;
+    applyFlagsSnapshot(frame.options, options);
 }
 
 /// Pop frame and backtrack if stack is non-empty. Returns false if stack was empty.
@@ -171,7 +263,7 @@ fn matchCharClass(cc: *const @import("parser.zig").CharClass, input: []const u8,
     // Fast path for ASCII: check dense bitmap first (O(1)).
     // Only use bitmap for non-negated classes with no POSIX/Unicode classes,
     // because bitmap tracks ranges only.
-    if (ch < 128 and cc.has_ascii_bitmap and !cc.negated and !cc.has_ranges_or_posix and !cc.has_unicode_ranges and !cc.has_unicode_props) {
+    if (ch < 128 and case_sensitive and cc.has_ascii_bitmap and !cc.negated and !cc.has_posix_classes and !cc.has_unicode_ranges and !cc.has_unicode_props) {
         const byte = ch;
         const byte_mask = @as(u1, @truncate(cc.ascii_bitmap[byte >> 3] >> @truncate(byte & 7)));
         if (byte_mask != 0) return 1;
@@ -1771,241 +1863,87 @@ const _Pe_ranges = [_][2]u21{
     .{ 0xFF63, 0xFF63 },
 };
 
-fn isUnicodeProperty(cp: u21, property: []const u8) bool {
-    // Fast path for ASCII characters
-    if (cp < 128) {
-        const ch: u8 = @intCast(cp);
-        if (property.len == 1) {
-            switch (property[0]) {
-                'L' => return std.ascii.isAlphabetic(ch),
-                'N' => return std.ascii.isDigit(ch),
-                'P' => return std.ascii.isPunctuation(ch),
-                'S' => return ch == '$' or ch == '+' or ch == '<' or ch == '=' or ch == '>' or ch == '^' or ch == '|' or ch == '~',
-                'Z' => return std.ascii.isWhitespace(ch),
-                'C' => return ch < 0x20 or ch == 0x7F,
-                'M' => return false,
-                else => {},
-            }
-        } else if (property.len == 2) {
-            switch (property[0]) {
-                'L' => switch (property[1]) {
-                    'u' => return std.ascii.isUpper(ch),
-                    'l' => return std.ascii.isLower(ch),
-                    't', 'm', 'o' => return false,
-                    else => {},
-                },
-                'N' => switch (property[1]) {
-                    'd' => return std.ascii.isDigit(ch),
-                    'l', 'o' => return false,
-                    else => {},
-                },
-                'P' => switch (property[1]) {
-                    'c' => return ch == '_',
-                    'd' => return ch == '-',
-                    's' => return ch == '(' or ch == '[' or ch == '{',
-                    'e' => return ch == ')' or ch == ']' or ch == '}',
-                    'i' => return ch == 0xAB,
-                    'f' => return ch == 0xBB,
-                    'o' => return std.ascii.isPunctuation(ch) and ch != '_' and ch != '-' and ch != '(' and ch != '[' and ch != '{' and ch != ')' and ch != ']' and ch != '}',
-                    else => {},
-                },
-                'S' => switch (property[1]) {
-                    'c' => return ch == '$',
-                    'k' => return ch == '^' or ch == '`',
-                    'm' => return ch == '+' or ch == '<' or ch == '=' or ch == '>' or ch == '|' or ch == '~',
-                    'o' => return false,
-                    else => {},
-                },
-                'Z' => switch (property[1]) {
-                    's' => return ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r',
-                    'l', 'p' => return false,
-                    else => {},
-                },
-                'C' => switch (property[1]) {
-                    'c' => return ch < 0x20 or ch == 0x7F,
-                    'f', 'o', 's' => return false,
-                    else => {},
-                },
-                'M' => return false,
-                else => {},
-            }
-        }
+fn isUnicodeProperty(cp: u21, prop: UnicodeProp) bool {
+    switch (prop) {
+        .L => return if (cp < 128) std.ascii.isAlphabetic(@intCast(cp)) else isUnicodeProperty(cp, .Lu) or isUnicodeProperty(cp, .Ll) or isUnicodeProperty(cp, .Lt) or isUnicodeProperty(cp, .Lm) or isUnicodeProperty(cp, .Lo),
+        .Lu => return if (cp < 128) std.ascii.isUpper(@intCast(cp)) else inUnicodeRanges(cp, &_Lu_ranges) or (cp >= 0x0100 and cp <= 0x0136 and cp % 2 == 0) or (cp >= 0x0139 and cp <= 0x0147 and cp % 2 == 1) or (cp >= 0x014A and cp <= 0x0176 and cp % 2 == 0),
+        .Ll => return if (cp < 128) std.ascii.isLower(@intCast(cp)) else inUnicodeRanges(cp, &_Ll_ranges) or (cp >= 0x0101 and cp <= 0x0137 and cp % 2 == 1) or (cp >= 0x013A and cp <= 0x0148 and cp % 2 == 0) or (cp >= 0x014B and cp <= 0x0177 and cp % 2 == 1) or (cp >= 0x017A and cp <= 0x017E and cp % 2 == 0),
+        .Lt => return if (cp < 128) false else inUnicodeRanges(cp, &_Lt_ranges),
+        .Lm => return if (cp < 128) false else inUnicodeRanges(cp, &_Lm_ranges),
+        .Lo => return if (cp < 128) false else inUnicodeRanges(cp, &_Lo_ranges),
+        .N => return if (cp < 128) std.ascii.isDigit(@intCast(cp)) else isUnicodeProperty(cp, .Nd) or isUnicodeProperty(cp, .Nl) or isUnicodeProperty(cp, .No),
+        .Nd => return if (cp < 128) std.ascii.isDigit(@intCast(cp)) else inUnicodeRanges(cp, &_Nd_ranges),
+        .Nl => return if (cp < 128) false else inUnicodeRanges(cp, &_Nl_ranges),
+        .No => return if (cp < 128) false else inUnicodeRanges(cp, &_No_ranges),
+        .P => return if (cp < 128) std.ascii.isPunctuation(@intCast(cp)) else isUnicodeProperty(cp, .Pc) or isUnicodeProperty(cp, .Pd) or isUnicodeProperty(cp, .Ps) or isUnicodeProperty(cp, .Pe) or isUnicodeProperty(cp, .Pi) or isUnicodeProperty(cp, .Pf) or isUnicodeProperty(cp, .Po),
+        .Pc => return if (cp < 128) @as(u8, @intCast(cp)) == '_' else inUnicodeRanges(cp, &_Pc_ranges),
+        .Pd => return if (cp < 128) @as(u8, @intCast(cp)) == '-' else inUnicodeRanges(cp, &_Pd_ranges),
+        .Ps => return if (cp < 128) @as(u8, @intCast(cp)) == '(' or @as(u8, @intCast(cp)) == '[' or @as(u8, @intCast(cp)) == '{' else inUnicodeRanges(cp, &_Ps_ranges),
+        .Pe => return if (cp < 128) @as(u8, @intCast(cp)) == ')' or @as(u8, @intCast(cp)) == ']' or @as(u8, @intCast(cp)) == '}' else inUnicodeRanges(cp, &_Pe_ranges),
+        .Pi => return if (cp < 128) @as(u8, @intCast(cp)) == 0xAB else inUnicodeRanges(cp, &_Pi_ranges),
+        .Pf => return if (cp < 128) @as(u8, @intCast(cp)) == 0xBB else inUnicodeRanges(cp, &_Pf_ranges),
+        .Po => return if (cp < 128) std.ascii.isPunctuation(@intCast(cp)) and @as(u8, @intCast(cp)) != '_' and @as(u8, @intCast(cp)) != '-' and @as(u8, @intCast(cp)) != '(' and @as(u8, @intCast(cp)) != '[' and @as(u8, @intCast(cp)) != '{' and @as(u8, @intCast(cp)) != ')' and @as(u8, @intCast(cp)) != ']' and @as(u8, @intCast(cp)) != '}' else inUnicodeRanges(cp, &_Po_ranges),
+        .S => return if (cp < 128) @as(u8, @intCast(cp)) == '$' or @as(u8, @intCast(cp)) == '+' or @as(u8, @intCast(cp)) == '<' or @as(u8, @intCast(cp)) == '=' or @as(u8, @intCast(cp)) == '>' or @as(u8, @intCast(cp)) == '^' or @as(u8, @intCast(cp)) == '|' or @as(u8, @intCast(cp)) == '~' else isUnicodeProperty(cp, .Sc) or isUnicodeProperty(cp, .Sk) or isUnicodeProperty(cp, .Sm) or isUnicodeProperty(cp, .So),
+        .Sc => return if (cp < 128) @as(u8, @intCast(cp)) == '$' else inUnicodeRanges(cp, &_Sc_ranges),
+        .Sk => return if (cp < 128) @as(u8, @intCast(cp)) == '^' or @as(u8, @intCast(cp)) == '`' else inUnicodeRanges(cp, &_Sk_ranges),
+        .Sm => return if (cp < 128) @as(u8, @intCast(cp)) == '+' or @as(u8, @intCast(cp)) == '<' or @as(u8, @intCast(cp)) == '=' or @as(u8, @intCast(cp)) == '>' or @as(u8, @intCast(cp)) == '|' or @as(u8, @intCast(cp)) == '~' else inUnicodeRanges(cp, &_Sm_ranges),
+        .So => return if (cp < 128) false else inUnicodeRanges(cp, &_So_ranges),
+        .Z => return if (cp < 128) std.ascii.isWhitespace(@intCast(cp)) else isUnicodeProperty(cp, .Zs) or isUnicodeProperty(cp, .Zl) or isUnicodeProperty(cp, .Zp),
+        .Zs => return if (cp < 128) @as(u8, @intCast(cp)) == ' ' or @as(u8, @intCast(cp)) == '\t' or @as(u8, @intCast(cp)) == '\n' or @as(u8, @intCast(cp)) == '\r' else inUnicodeRanges(cp, &_Zs_ranges),
+        .Zl => return if (cp < 128) false else inUnicodeRanges(cp, &_Zl_ranges),
+        .Zp => return if (cp < 128) false else inUnicodeRanges(cp, &_Zp_ranges),
+        .C => return if (cp < 128) @as(u8, @intCast(cp)) < 0x20 or @as(u8, @intCast(cp)) == 0x7F else isUnicodeProperty(cp, .Cc) or isUnicodeProperty(cp, .Cf) or isUnicodeProperty(cp, .Co) or isUnicodeProperty(cp, .Cs),
+        .Cc => return if (cp < 128) @as(u8, @intCast(cp)) < 0x20 or @as(u8, @intCast(cp)) == 0x7F else inUnicodeRanges(cp, &_Cc_ranges),
+        .Cf => return if (cp < 128) false else inUnicodeRanges(cp, &_Cf_ranges),
+        .Co => return if (cp < 128) false else inUnicodeRanges(cp, &_Co_ranges),
+        .Cs => return if (cp < 128) false else inUnicodeRanges(cp, &_Cs_ranges),
+        .M => return if (cp < 128) false else isUnicodeProperty(cp, .Mn) or isUnicodeProperty(cp, .Mc) or isUnicodeProperty(cp, .Me),
+        .Mn => return if (cp < 128) false else inUnicodeRanges(cp, &_Mn_ranges),
+        .Mc => return if (cp < 128) false else inUnicodeRanges(cp, &_Mc_ranges),
+        .Me => return if (cp < 128) false else inUnicodeRanges(cp, &_Me_ranges),
+        // Scripts
+        .Han => return (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0x3400 and cp <= 0x4DBF) or (cp >= 0xF900 and cp <= 0xFAFF),
+        .Latin => return (cp >= 0x0041 and cp <= 0x007A) or (cp >= 0x00C0 and cp <= 0x00FF) or (cp >= 0x0100 and cp <= 0x017F) or (cp >= 0x0180 and cp <= 0x024F),
+        .Greek => return (cp >= 0x0370 and cp <= 0x03FF) or (cp >= 0x1F00 and cp <= 0x1FFF),
+        .Cyrillic => return (cp >= 0x0400 and cp <= 0x04FF) or (cp >= 0x0500 and cp <= 0x052F) or (cp >= 0x2DE0 and cp <= 0x2DFF) or (cp >= 0xA640 and cp <= 0xA69F),
+        .Arabic => return (cp >= 0x0600 and cp <= 0x06FF) or (cp >= 0x0750 and cp <= 0x077F) or (cp >= 0x08A0 and cp <= 0x08FF) or (cp >= 0xFB50 and cp <= 0xFDFF) or (cp >= 0xFE70 and cp <= 0xFEFF),
+        .Hebrew => return (cp >= 0x0590 and cp <= 0x05FF) or (cp >= 0xFB1D and cp <= 0xFB4F),
+        .Armenian => return cp >= 0x0530 and cp <= 0x058F,
+        .Georgian => return (cp >= 0x10A0 and cp <= 0x10FF) or (cp >= 0x2D00 and cp <= 0x2D2F),
+        .Thai => return cp >= 0x0E00 and cp <= 0x0E7F,
+        .Devanagari => return cp >= 0x0900 and cp <= 0x097F,
+        .Hiragana => return (cp >= 0x3040 and cp <= 0x309F) or (cp >= 0x1B001 and cp <= 0x1B11F),
+        .Katakana => return (cp >= 0x30A0 and cp <= 0x30FF) or (cp >= 0x31F0 and cp <= 0x31FF) or (cp >= 0xFF65 and cp <= 0xFF9F),
+        .Hangul => return (cp >= 0x1100 and cp <= 0x11FF) or (cp >= 0x3130 and cp <= 0x318F) or (cp >= 0xA960 and cp <= 0xA97F) or (cp >= 0xAC00 and cp <= 0xD7AF) or (cp >= 0xD7B0 and cp <= 0xD7FF),
     }
-    // Slow path for non-ASCII or unhandled properties
-    if (property.len == 1) {
-        switch (property[0]) {
-            'L' => return isUnicodeProperty(cp, "Lu") or
-                isUnicodeProperty(cp, "Ll") or
-                isUnicodeProperty(cp, "Lt") or
-                isUnicodeProperty(cp, "Lm") or
-                isUnicodeProperty(cp, "Lo"),
-            'N' => return isUnicodeProperty(cp, "Nd") or
-                isUnicodeProperty(cp, "Nl") or
-                isUnicodeProperty(cp, "No"),
-            'P' => return isUnicodeProperty(cp, "Pc") or
-                isUnicodeProperty(cp, "Pd") or
-                isUnicodeProperty(cp, "Ps") or
-                isUnicodeProperty(cp, "Pe") or
-                isUnicodeProperty(cp, "Pi") or
-                isUnicodeProperty(cp, "Pf") or
-                isUnicodeProperty(cp, "Po"),
-            'S' => return isUnicodeProperty(cp, "Sc") or
-                isUnicodeProperty(cp, "Sk") or
-                isUnicodeProperty(cp, "Sm") or
-                isUnicodeProperty(cp, "So"),
-            'Z' => return isUnicodeProperty(cp, "Zs") or
-                isUnicodeProperty(cp, "Zl") or
-                isUnicodeProperty(cp, "Zp"),
-            'C' => return isUnicodeProperty(cp, "Cc") or
-                isUnicodeProperty(cp, "Cf") or
-                isUnicodeProperty(cp, "Co") or
-                isUnicodeProperty(cp, "Cs"),
-            'M' => return isUnicodeProperty(cp, "Mn") or
-                isUnicodeProperty(cp, "Mc") or
-                isUnicodeProperty(cp, "Me"),
-            else => return false,
-        }
+}
+
+/// Parse a property name string and dispatch to the enum-based check.
+fn isUnicodePropertyStr(cp: u21, property: []const u8) bool {
+    const prop = prop_map.get(property) orelse return false;
+    return isUnicodeProperty(cp, prop);
+}
+
+/// Decode a UTF-8 codepoint at `pos` in `input`.
+/// Returns the codepoint and byte length. On invalid UTF-8, falls back to
+/// treating the byte as a single ASCII/invalid character.
+fn decodeCodepointAt(input: []const u8, pos: usize) struct { cp: u21, len: usize } {
+    const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch {
+        return .{ .cp = input[pos], .len = 1 };
+    };
+    if (pos + byte_len > input.len) {
+        return .{ .cp = input[pos], .len = 1 };
     }
-    if (property.len == 2) {
-        switch (property[0]) {
-            'L' => switch (property[1]) {
-                'u' => return inUnicodeRanges(cp, &_Lu_ranges) or
-                    (cp >= 0x0100 and cp <= 0x0136 and cp % 2 == 0) or
-                    (cp >= 0x0139 and cp <= 0x0147 and cp % 2 == 1) or
-                    (cp >= 0x014A and cp <= 0x0176 and cp % 2 == 0),
-                'l' => return inUnicodeRanges(cp, &_Ll_ranges) or
-                    (cp >= 0x0101 and cp <= 0x0137 and cp % 2 == 1) or
-                    (cp >= 0x013A and cp <= 0x0148 and cp % 2 == 0) or
-                    (cp >= 0x014B and cp <= 0x0177 and cp % 2 == 1) or
-                    (cp >= 0x017A and cp <= 0x017E and cp % 2 == 0),
-                't' => return inUnicodeRanges(cp, &_Lt_ranges),
-                'm' => return inUnicodeRanges(cp, &_Lm_ranges),
-                'o' => return inUnicodeRanges(cp, &_Lo_ranges),
-                else => return false,
-            },
-            'N' => switch (property[1]) {
-                'd' => return inUnicodeRanges(cp, &_Nd_ranges),
-                'l' => return inUnicodeRanges(cp, &_Nl_ranges),
-                'o' => return inUnicodeRanges(cp, &_No_ranges),
-                else => return false,
-            },
-            'P' => switch (property[1]) {
-                'c' => return inUnicodeRanges(cp, &_Pc_ranges),
-                'd' => return inUnicodeRanges(cp, &_Pd_ranges),
-                's' => return inUnicodeRanges(cp, &_Ps_ranges),
-                'e' => return inUnicodeRanges(cp, &_Pe_ranges),
-                'i' => return inUnicodeRanges(cp, &_Pi_ranges),
-                'f' => return inUnicodeRanges(cp, &_Pf_ranges),
-                'o' => return inUnicodeRanges(cp, &_Po_ranges),
-                else => return false,
-            },
-            'S' => switch (property[1]) {
-                'c' => return inUnicodeRanges(cp, &_Sc_ranges),
-                'k' => return inUnicodeRanges(cp, &_Sk_ranges),
-                'm' => return inUnicodeRanges(cp, &_Sm_ranges),
-                'o' => return inUnicodeRanges(cp, &_So_ranges),
-                else => return false,
-            },
-            'Z' => switch (property[1]) {
-                's' => return inUnicodeRanges(cp, &_Zs_ranges),
-                'l' => return inUnicodeRanges(cp, &_Zl_ranges),
-                'p' => return inUnicodeRanges(cp, &_Zp_ranges),
-                else => return false,
-            },
-            'C' => switch (property[1]) {
-                'c' => return inUnicodeRanges(cp, &_Cc_ranges),
-                'f' => return inUnicodeRanges(cp, &_Cf_ranges),
-                'o' => return inUnicodeRanges(cp, &_Co_ranges),
-                's' => return inUnicodeRanges(cp, &_Cs_ranges),
-                else => return false,
-            },
-            'M' => switch (property[1]) {
-                'n' => return inUnicodeRanges(cp, &_Mn_ranges),
-                'c' => return inUnicodeRanges(cp, &_Mc_ranges),
-                'e' => return inUnicodeRanges(cp, &_Me_ranges),
-                else => return false,
-            },
-            else => return false,
-        }
-    } else if (property.len == 3 and property[0] == 'H' and property[1] == 'a' and property[2] == 'n') {
-        return (cp >= 0x4E00 and cp <= 0x9FFF) or
-            (cp >= 0x3400 and cp <= 0x4DBF) or
-            (cp >= 0xF900 and cp <= 0xFAFF);
-    } else if (property.len == 5 and property[0] == 'L' and property[1] == 'a' and property[2] == 't' and property[3] == 'i' and property[4] == 'n') {
-        return (cp >= 0x0041 and cp <= 0x007A) or
-            (cp >= 0x00C0 and cp <= 0x00FF) or
-            (cp >= 0x0100 and cp <= 0x017F) or
-            (cp >= 0x0180 and cp <= 0x024F);
-    } else if (property.len == 5 and property[0] == 'G' and property[1] == 'r' and property[2] == 'e' and property[3] == 'e' and property[4] == 'k') {
-        return (cp >= 0x0370 and cp <= 0x03FF) or
-            (cp >= 0x1F00 and cp <= 0x1FFF);
-    } else if (property.len == 8 and property[0] == 'C' and property[1] == 'y' and property[2] == 'r' and property[3] == 'i' and property[4] == 'l' and property[5] == 'l' and property[6] == 'i' and property[7] == 'c') {
-        return (cp >= 0x0400 and cp <= 0x04FF) or
-            (cp >= 0x0500 and cp <= 0x052F) or
-            (cp >= 0x2DE0 and cp <= 0x2DFF) or
-            (cp >= 0xA640 and cp <= 0xA69F);
-    } else if (property.len == 6 and property[0] == 'A' and property[1] == 'r' and property[2] == 'a' and property[3] == 'b' and property[4] == 'i' and property[5] == 'c') {
-        return (cp >= 0x0600 and cp <= 0x06FF) or
-            (cp >= 0x0750 and cp <= 0x077F) or
-            (cp >= 0x08A0 and cp <= 0x08FF) or
-            (cp >= 0xFB50 and cp <= 0xFDFF) or
-            (cp >= 0xFE70 and cp <= 0xFEFF);
-    } else if (property.len == 6 and property[0] == 'H' and property[1] == 'e' and property[2] == 'b' and property[3] == 'r' and property[4] == 'e' and property[5] == 'w') {
-        return (cp >= 0x0590 and cp <= 0x05FF) or
-            (cp >= 0xFB1D and cp <= 0xFB4F);
-    } else if (property.len == 8 and property[0] == 'A' and property[1] == 'r' and property[2] == 'm' and property[3] == 'e' and property[4] == 'n' and property[5] == 'i' and property[6] == 'a' and property[7] == 'n') {
-        return cp >= 0x0530 and cp <= 0x058F;
-    } else if (property.len == 8 and property[0] == 'G' and property[1] == 'e' and property[2] == 'o' and property[3] == 'r' and property[4] == 'g' and property[5] == 'i' and property[6] == 'a' and property[7] == 'n') {
-        return (cp >= 0x10A0 and cp <= 0x10FF) or
-            (cp >= 0x2D00 and cp <= 0x2D2F);
-    } else if (property.len == 4 and property[0] == 'T' and property[1] == 'h' and property[2] == 'a' and property[3] == 'i') {
-        return cp >= 0x0E00 and cp <= 0x0E7F;
-    } else if (property.len == 10 and property[0] == 'D' and property[1] == 'e' and property[2] == 'v' and property[3] == 'a' and property[4] == 'n' and property[5] == 'a' and property[6] == 'g' and property[7] == 'a' and property[8] == 'r' and property[9] == 'i') {
-        return cp >= 0x0900 and cp <= 0x097F;
-    } else if (property.len == 8 and property[0] == 'H' and property[1] == 'i' and property[2] == 'r' and property[3] == 'a' and property[4] == 'g' and property[5] == 'a' and property[6] == 'n' and property[7] == 'a') {
-        return (cp >= 0x3040 and cp <= 0x309F) or
-            (cp >= 0x1B001 and cp <= 0x1B11F);
-    } else if (property.len == 8 and property[0] == 'K' and property[1] == 'a' and property[2] == 't' and property[3] == 'a' and property[4] == 'k' and property[5] == 'a' and property[6] == 'n' and property[7] == 'a') {
-        return (cp >= 0x30A0 and cp <= 0x30FF) or
-            (cp >= 0x31F0 and cp <= 0x31FF) or
-            (cp >= 0xFF65 and cp <= 0xFF9F);
-    } else if (property.len == 6 and property[0] == 'H' and property[1] == 'a' and property[2] == 'n' and property[3] == 'g' and property[4] == 'u' and property[5] == 'l') {
-        return (cp >= 0x1100 and cp <= 0x11FF) or
-            (cp >= 0x3130 and cp <= 0x318F) or
-            (cp >= 0xA960 and cp <= 0xA97F) or
-            (cp >= 0xAC00 and cp <= 0xD7AF) or
-            (cp >= 0xD7B0 and cp <= 0xD7FF);
-    }
-    return false;
+    const cp = std.unicode.utf8Decode(input[pos .. pos + byte_len]) catch {
+        return .{ .cp = input[pos], .len = 1 };
+    };
+    return .{ .cp = cp, .len = byte_len };
 }
 
 fn matchUnicodeProperty(input: []const u8, pos: usize, property: []const u8, negated: bool) ?usize {
     if (pos >= input.len) return null;
-
-    // Get UTF-8 sequence length
-    const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch {
-        const ch = input[pos];
-        const matches = isUnicodeProperty(ch, property);
-        if (negated) {
-            if (matches) return null;
-            return 1;
-        } else {
-            if (!matches) return null;
-            return 1;
-        }
-    };
-
-    if (pos + byte_len > input.len) {
-        const ch = input[pos];
-        return matchPropertyResult(isUnicodeProperty(ch, property), negated, 1);
-    }
-
-    const cp = std.unicode.utf8Decode(input[pos .. pos + byte_len]) catch {
-        const ch = input[pos];
-        return matchPropertyResult(isUnicodeProperty(ch, property), negated, 1);
-    };
-
-    return matchPropertyResult(isUnicodeProperty(cp, property), negated, byte_len);
+    const decoded = decodeCodepointAt(input, pos);
+    return matchPropertyResult(isUnicodePropertyStr(decoded.cp, property), negated, decoded.len);
 }
 
 /// Return byte_len if (matches XOR negated), else null.
@@ -2037,28 +1975,20 @@ fn isUnicodeWordChar(input: []const u8, pos: usize) bool {
     const byte_len = std.unicode.utf8ByteSequenceLength(start_byte) catch return false;
     if (start + byte_len > input.len) return false;
     const cp = std.unicode.utf8Decode(input[start .. start + byte_len]) catch return false;
-    return isUnicodeProperty(cp, "L") or isUnicodeProperty(cp, "Nd") or isUnicodeProperty(cp, "M");
+    return isUnicodeProperty(cp, .L) or isUnicodeProperty(cp, .Nd) or isUnicodeProperty(cp, .M);
 }
 
 /// Check if a character at position `pos` matches any Unicode property in the given CharClass.
 /// Returns the byte length of the matched UTF-8 sequence, or null if no match.
 fn matchUnicodePropertyInClass(input: []const u8, pos: usize, cc: *const @import("parser.zig").CharClass) ?usize {
     if (pos >= input.len or cc.unicode_properties.items.len == 0) return null;
-
-    const byte_len = std.unicode.utf8ByteSequenceLength(input[pos]) catch 1;
-    const actual_len = if (pos + byte_len > input.len) 1 else byte_len;
-
-    const cp = if (actual_len == 1)
-        @as(u21, input[pos])
-    else
-        std.unicode.utf8Decode(input[pos .. pos + actual_len]) catch @as(u21, input[pos]);
-
+    const decoded = decodeCodepointAt(input, pos);
     for (cc.unicode_properties.items) |entry| {
-        if (isUnicodeProperty(cp, entry.name) != entry.negated) {
-            return matchPropertyResult(true, cc.negated, actual_len);
+        if (isUnicodePropertyStr(decoded.cp, entry.name) != entry.negated) {
+            return matchPropertyResult(true, cc.negated, decoded.len);
         }
     }
-    return matchPropertyResult(false, cc.negated, actual_len);
+    return matchPropertyResult(false, cc.negated, decoded.len);
 }
 
 /// Check if the character at pos is a line ending character (single char, not CRLF).
@@ -2121,7 +2051,7 @@ fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
         const next_len = std.unicode.utf8ByteSequenceLength(input[pos + total_len]) catch break;
         if (pos + total_len + next_len > input.len) break;
         const next_cp = std.unicode.utf8Decode(input[pos + total_len .. pos + total_len + next_len]) catch break;
-        if (!isUnicodeProperty(next_cp, "M")) break;
+        if (!isUnicodeProperty(next_cp, .M)) break;
         total_len += next_len;
     }
 
@@ -2139,6 +2069,9 @@ pub const Vm = struct {
     match_generation: u32 = 0,
     // Reusable per-match buffer for captures (size is fixed after compile)
     captures_buf: std.ArrayList(?usize) = .empty,
+    // Reusable backtracking stacks (pre-allocated, cleared per match)
+    stack_buf: std.ArrayList(Frame) = .empty,
+    subroutine_stack_buf: std.ArrayList(usize) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, bytecode: Bytecode, options: RegexOptions) !Vm {
         var vm = Vm{
@@ -2152,11 +2085,14 @@ pub const Vm = struct {
             .match_generation = 0,
             .captures_buf = .empty,
         };
+        errdefer vm.deinit();
         // Pre-allocate fixed-size buffers based on bytecode size
         try vm.captures_buf.resize(allocator, (bytecode.num_groups + 1) * 2);
         try vm.last_pos.resize(allocator, bytecode.instructions.items.len);
         try vm.last_pos_gen.resize(allocator, bytecode.instructions.items.len);
         try vm.atomic_stack.ensureTotalCapacity(allocator, 64);
+        try vm.stack_buf.ensureTotalCapacity(allocator, 64);
+        try vm.subroutine_stack_buf.ensureTotalCapacity(allocator, 32);
         return vm;
     }
 
@@ -2165,6 +2101,8 @@ pub const Vm = struct {
         self.last_pos.deinit(self.allocator);
         self.last_pos_gen.deinit(self.allocator);
         self.captures_buf.deinit(self.allocator);
+        self.stack_buf.deinit(self.allocator);
+        self.subroutine_stack_buf.deinit(self.allocator);
         self.bytecode.deinit();
     }
 
@@ -2184,15 +2122,32 @@ pub const Vm = struct {
             @memset(captures.items, null);
         }
 
+        // Use local stacks for sub-matches (recursive execInternal) to avoid
+        // clearing the outer match's state. Reuse pre-allocated buffers for
+        // main matches only.
         var stack_local: std.ArrayList(Frame) = .empty;
-        defer stack_local.deinit(self.allocator);
-        try stack_local.ensureTotalCapacity(self.allocator, 64);
-        var stack: *std.ArrayList(Frame) = &stack_local;
+        defer if (is_sub) stack_local.deinit(self.allocator);
+        var stack: *std.ArrayList(Frame) = undefined;
+        if (is_sub) {
+            try stack_local.ensureTotalCapacity(self.allocator, 64);
+            stack = &stack_local;
+        } else {
+            self.stack_buf.clearRetainingCapacity();
+            try self.stack_buf.ensureTotalCapacity(self.allocator, 64);
+            stack = &self.stack_buf;
+        }
 
         var subroutine_stack_local: std.ArrayList(usize) = .empty;
-        defer subroutine_stack_local.deinit(self.allocator);
-        try subroutine_stack_local.ensureTotalCapacity(self.allocator, 32);
-        var subroutine_stack: *std.ArrayList(usize) = &subroutine_stack_local;
+        defer if (is_sub) subroutine_stack_local.deinit(self.allocator);
+        var subroutine_stack: *std.ArrayList(usize) = undefined;
+        if (is_sub) {
+            try subroutine_stack_local.ensureTotalCapacity(self.allocator, 32);
+            subroutine_stack = &subroutine_stack_local;
+        } else {
+            self.subroutine_stack_buf.clearRetainingCapacity();
+            try self.subroutine_stack_buf.ensureTotalCapacity(self.allocator, 32);
+            subroutine_stack = &self.subroutine_stack_buf;
+        }
 
         const saved_options = self.options;
         defer if (is_sub) {
@@ -2316,10 +2271,12 @@ pub const Vm = struct {
                     try stack.append(self.allocator, .{
                         .pc = target,
                         .pos = pos,
-                        .capture_slot = null,
-                        .capture_old_value = null,
-                        .options = self.options,
+                        .capture_slot = SENTINEL,
+                        .capture_old_value = SENTINEL,
+                        .paired_capture_slot = SENTINEL,
+                        .paired_capture_old_value = SENTINEL,
                         .subroutine_stack_len = subroutine_stack.items.len,
+                        .options = snapshotFlags(self.options),
                     });
                     pc += 1;
                 },
@@ -2333,14 +2290,16 @@ pub const Vm = struct {
                         .pc = pc + 1,
                         .pos = pos,
                         .capture_slot = slot,
-                        .capture_old_value = old_val,
-                        .options = self.options,
+                        .capture_old_value = old_val orelse SENTINEL,
+                        .paired_capture_slot = SENTINEL,
+                        .paired_capture_old_value = SENTINEL,
                         .subroutine_stack_len = subroutine_stack.items.len,
+                        .options = snapshotFlags(self.options),
                     };
                     if (slot % 2 == 1) {
                         const start_slot = slot - 1;
                         frame.paired_capture_slot = start_slot;
-                        frame.paired_capture_old_value = captures.items[start_slot];
+                        frame.paired_capture_old_value = captures.items[start_slot] orelse SENTINEL;
                     }
                     try stack.append(self.allocator, frame);
                     pc += 1;

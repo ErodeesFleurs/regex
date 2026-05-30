@@ -188,6 +188,10 @@ pub const Compiler = struct {
             .Any => try self.emitOp(.Any),
             .CharClass => {
                 const cc = try self.allocator.create(CharClass);
+                errdefer {
+                    cc.deinit();
+                    self.allocator.destroy(cc);
+                }
                 if (node.char_class_transferred) {
                     // Deep copy for additional uses (e.g. quantifier repetition)
                     cc.* = CharClass.init(self.allocator, node.char_class.?.negated);

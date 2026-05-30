@@ -43,6 +43,10 @@ pub const Regex = struct {
         const bytecode = try compiler.compile(ast.?, options);
 
         var group_names: std.ArrayList(GroupNameEntry) = .empty;
+        errdefer {
+            for (group_names.items) |e| allocator.free(e.name);
+            group_names.deinit(allocator);
+        }
         var it = parser.group_names.iterator();
         while (it.next()) |entry| {
             const key_copy = try allocator.dupe(u8, entry.key_ptr.*);

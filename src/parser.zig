@@ -115,6 +115,7 @@ pub const CharClass = struct {
     allocator: std.mem.Allocator,
     // Cached flags to avoid recomputing on every match
     has_ranges_or_posix: bool = false,
+    has_posix_classes: bool = false,
     has_unicode_ranges: bool = false,
     has_unicode_props: bool = false,
 
@@ -159,6 +160,13 @@ pub const CharClass = struct {
             while (i <= end) : (i += 1) {
                 self.ascii_bitmap[i >> 3] |= @as(u8, 1) << @truncate(i & 7);
             }
+        } else if (start < 128) {
+            // Range extends past ASCII; fill the ASCII portion in the bitmap.
+            self.has_ascii_bitmap = true;
+            var i: usize = start;
+            while (i < 128) : (i += 1) {
+                self.ascii_bitmap[i >> 3] |= @as(u8, 1) << @truncate(i & 7);
+            }
         }
     }
 
@@ -171,6 +179,7 @@ pub const CharClass = struct {
         const copy = try self.allocator.dupe(u8, name);
         try self.posix_classes.append(self.allocator, copy);
         self.has_ranges_or_posix = true;
+        self.has_posix_classes = true;
     }
 
     pub fn addShorthandClass(self: *CharClass, shorthand: u8) !void {
