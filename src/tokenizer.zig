@@ -97,6 +97,7 @@ pub const Tokenizer = struct {
     literal_quote_mode: bool,
     free_spacing: bool,
     char_class_depth: usize,
+    peeked_token: ?Token = null,
 
     pub fn init(input: []const u8) Tokenizer {
         return .{
@@ -105,6 +106,7 @@ pub const Tokenizer = struct {
             .literal_quote_mode = false,
             .free_spacing = false,
             .char_class_depth = 0,
+            .peeked_token = null,
         };
     }
 
@@ -125,6 +127,14 @@ pub const Tokenizer = struct {
     }
 
     pub fn nextToken(self: *Tokenizer) Token {
+        if (self.peeked_token) |token| {
+            self.peeked_token = null;
+            return token;
+        }
+        return self.nextTokenInternal();
+    }
+
+    fn nextTokenInternal(self: *Tokenizer) Token {
         if (self.position >= self.input.len) {
             return .{
                 .type = .EOF,
@@ -419,12 +429,10 @@ pub const Tokenizer = struct {
     }
     
     pub fn peek(self: *Tokenizer) Token {
-        const saved_pos = self.position;
-        const saved_quote_mode = self.literal_quote_mode;
-        const token = self.nextToken();
-        self.position = saved_pos;
-        self.literal_quote_mode = saved_quote_mode;
-        return token;
+        if (self.peeked_token == null) {
+            self.peeked_token = self.nextTokenInternal();
+        }
+        return self.peeked_token.?;
     }
     
     pub fn expect(self: *Tokenizer, expected: TokenType) !Token {
