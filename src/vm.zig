@@ -1977,11 +1977,16 @@ fn isLineEndingChar(input: []const u8, pos: usize) ?usize {
 
 /// Match a single grapheme cluster (simplified implementation).
 /// Returns the total byte length of the cluster, or null if no cluster at pos.
+/// Check for CRLF sequence at position.
+fn isCrlf(input: []const u8, pos: usize) bool {
+    return input[pos] == '\r' and pos + 1 < input.len and input[pos + 1] == '\n';
+}
+
 fn matchNewline(input: []const u8, pos: usize) ?usize {
     if (pos >= input.len) return null;
 
     // CRLF sequence
-    if (input[pos] == '\r' and pos + 1 < input.len and input[pos + 1] == '\n') {
+    if (isCrlf(input, pos)) {
         return 2;
     }
 
@@ -1992,7 +1997,7 @@ fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
     if (pos >= input.len) return null;
 
     // CR LF sequence is a single grapheme cluster
-    if (input[pos] == '\r' and pos + 1 < input.len and input[pos + 1] == '\n') {
+    if (isCrlf(input, pos)) {
         return 2;
     }
 
