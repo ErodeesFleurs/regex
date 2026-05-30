@@ -16,7 +16,6 @@ pub const Regex = struct {
     allocator: std.mem.Allocator,
     options: RegexOptions,
     group_names: std.ArrayList(GroupNameEntry),
-    is_static: bool = false, // true for comptime-compiled regex; skips deallocation of comptime data
 
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex {
         return compileWithOptions(allocator, pattern, .{});
@@ -59,19 +58,17 @@ pub const Regex = struct {
     }
 
     pub fn deinit(self: *Regex) void {
-        if (!self.is_static) {
-            // Free char_class pointers in bytecode
-            for (self.vm.bytecode.instructions.items) |inst| {
-                if (inst.char_class) |cc| {
-                    cc.deinit(self.allocator);
-                    self.allocator.destroy(cc);
-                }
+        // Free char_class pointers in bytecode
+        for (self.vm.bytecode.instructions.items) |inst| {
+            if (inst.char_class) |cc| {
+                cc.deinit(self.allocator);
+                self.allocator.destroy(cc);
             }
-            for (self.group_names.items) |entry| {
-                self.allocator.free(entry.name);
-            }
-            self.group_names.deinit(self.allocator);
         }
+        for (self.group_names.items) |entry| {
+            self.allocator.free(entry.name);
+        }
+        self.group_names.deinit(self.allocator);
         self.vm.bytecode.deinit();
         self.vm.deinit();
     }

@@ -138,7 +138,6 @@ pub const Bytecode = struct {
     assert_ends: std.ArrayList(usize), // indexed by PC, contains end PC for assert instructions
 
     allocator: std.mem.Allocator,
-    is_static: bool = false, // true for comptime-compiled bytecode; skips deallocation
 
     pub fn init(allocator: std.mem.Allocator) Bytecode {
         return .{
@@ -152,14 +151,12 @@ pub const Bytecode = struct {
     }
 
     pub fn deinit(self: *Bytecode) void {
-        if (!self.is_static) {
-            for (self.unicode_properties.items) |prop| {
-                self.allocator.free(prop);
-            }
-            self.unicode_properties.deinit(self.allocator);
-            self.instructions.deinit(self.allocator);
-            self.assert_ends.deinit(self.allocator);
+        for (self.unicode_properties.items) |prop| {
+            self.allocator.free(prop);
         }
+        self.unicode_properties.deinit(self.allocator);
+        self.instructions.deinit(self.allocator);
+        self.assert_ends.deinit(self.allocator);
     }
     
     pub fn emit(self: *Bytecode, inst: Instruction) !usize {
