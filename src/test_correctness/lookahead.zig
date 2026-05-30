@@ -67,7 +67,7 @@ test "lookbehind: variable width" {
     } else {
         try std.testing.expect(false);
     }
-    
+
     var result2 = try regex.find(allocator, "(?<=a+)b", "ab");
     if (result2) |*r| {
         defer r.deinit();
@@ -87,7 +87,7 @@ test "lookbehind: alternation" {
     } else {
         try std.testing.expect(false);
     }
-    
+
     var result2 = try regex.find(allocator, "(?<=foo|bar)baz", "barbaz");
     if (result2) |*r| {
         defer r.deinit();

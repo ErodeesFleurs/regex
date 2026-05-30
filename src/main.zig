@@ -36,7 +36,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
 fn parseArgs(args: []const []const u8) !CliOptions {
     var opts = CliOptions{};
     var i: usize = 1;
-    
+
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--find-all")) {
@@ -66,19 +66,19 @@ fn parseArgs(args: []const []const u8) !CliOptions {
             return error.TooManyArguments;
         }
     }
-    
+
     return opts;
 }
 
 pub fn main(init: std.process.Init) !void {
     const arena: std.mem.Allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    
+
     const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
-    
+
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_file_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
     const stderr_writer = &stderr_file_writer.interface;
@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
         try stderr_writer.flush();
         return;
     };
-    
+
     if (opts.help) {
         try printUsage(stdout_writer);
         try stdout_writer.flush();
@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         try stderr_writer.flush();
         return;
     }
-    
+
     const regex_opts = RegexOptions{
         .case_sensitive = !opts.case_insensitive,
         .multiline = opts.multiline,
@@ -119,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     defer regex.deinit();
-    
+
     if (opts.debug) {
         try stdout_writer.print("Bytecode:\n", .{});
         for (regex.vm.bytecode.instructions.items, 0..) |inst, i| {
@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
             for (results.items) |*r| r.deinit();
             results.deinit(arena);
         }
-        
+
         if (results.items.len == 0) {
             try stdout_writer.print("No matches found\n", .{});
         } else {
@@ -160,14 +160,14 @@ pub fn main(init: std.process.Init) !void {
         const matched = try regex.isMatch(opts.text);
         if (matched) {
             try stdout_writer.print("Match: YES\n", .{});
-            
+
             var result = try regex.find(opts.text);
             if (result) |*r| {
                 defer r.deinit();
                 if (r.getGroup(opts.text, 0)) |full_match| {
                     try stdout_writer.print("Full match: \"{s}\" at {d}-{d}\n", .{ full_match, r.start, r.end });
                 }
-                
+
                 // Show capture groups
                 var group_idx: usize = 1;
                 while (r.getGroup(opts.text, group_idx)) |group| : (group_idx += 1) {
@@ -181,4 +181,3 @@ pub fn main(init: std.process.Init) !void {
 
     try stdout_writer.flush();
 }
-

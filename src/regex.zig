@@ -38,9 +38,9 @@ pub const Regex = struct {
         }
 
         var compiler = Compiler.init(allocator);
+        defer compiler.deinit();
 
         const bytecode = try compiler.compile(ast.?, options);
-        compiler.group_ranges.deinit();
 
         var group_names: std.ArrayList(GroupNameEntry) = .empty;
         var it = parser.group_names.iterator();
@@ -61,7 +61,7 @@ pub const Regex = struct {
         for (self.vm.bytecode.instructions.items) |inst| {
             switch (inst) {
                 .CharClass => |cc| {
-                    cc.deinit(self.allocator);
+                    cc.deinit();
                     self.allocator.destroy(cc);
                 },
                 else => {},
@@ -75,7 +75,7 @@ pub const Regex = struct {
     }
 
     /// Get capture group content by name
-    pub fn getCaptureGroup(self: *Regex, match_result: MatchResult, input: []const u8, name: []const u8) ?[]const u8 {
+    pub fn getCaptureGroup(self: *Regex, match_result: *const MatchResult, input: []const u8, name: []const u8) ?[]const u8 {
         for (self.group_names.items) |entry| {
             if (std.mem.eql(u8, entry.name, name)) {
                 return match_result.getGroup(input, entry.index);
@@ -83,7 +83,7 @@ pub const Regex = struct {
         }
         return null;
     }
-    
+
     pub fn exec(self: *Regex, text: []const u8, start_pos: usize) !MatchResult {
         self.vm.last_match_end = start_pos;
         return try self.vm.exec(text, start_pos);
@@ -96,7 +96,7 @@ pub const Regex = struct {
 
     inline fn findBase(self: *Regex, text: []const u8, comptime fast: bool) !?MatchResult {
         const result = if (fast) try self.vm.findFast(text) else try self.vm.find(text);
-        if (result) |*r| {
+        if (result) |r| {
             if (r.matched) {
                 self.vm.last_match_end = r.end;
             }
@@ -114,7 +114,7 @@ pub const Regex = struct {
     pub fn findFast(self: *Regex, text: []const u8) !?MatchResult {
         return self.findBase(text, true);
     }
-    
+
     fn deinitMatchResults(results: *std.ArrayList(MatchResult)) void {
         for (results.items) |*r| {
             r.deinit();
@@ -192,7 +192,7 @@ pub const Regex = struct {
         defer result.deinit();
         return result.matched and result.end == text.len;
     }
-    
+
     /// Find the last capture group that matched.
     fn findLastCaptureGroup(match_result: MatchResult) ?usize {
         var last_group_idx: ?usize = null;
@@ -368,7 +368,7 @@ pub const Regex = struct {
 
         return result.toOwnedSlice(self.allocator);
     }
-    
+
     pub fn split(self: *Regex, text: []const u8) !std.ArrayList([]const u8) {
         return self.splitLimit(text, null);
     }
@@ -438,10 +438,10 @@ pub const MatchIteratorFast = MatchIteratorBase(true);
 
 test "regex basic" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "a*b");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("b"));
     try std.testing.expect(try regex.isMatch("ab"));
     try std.testing.expect(try regex.isMatch("aab"));
@@ -451,10 +451,10 @@ test "regex basic" {
 
 test "regex find" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "\\d+");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("123"));
     // isMatch only starts matching from position 0, so "abc123def" doesn't match
     // Use find to search for substring
@@ -463,59 +463,59 @@ test "regex find" {
 
 test "regex char class" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "[a-z]+");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("abc"));
 }
 
 test "regex negated char class" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "\\D+");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("abc"));
     try std.testing.expect(!try regex.isMatch("123"));
 }
 
 test "regex anchor start" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "^abc");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("abc"));
     try std.testing.expect(!try regex.isMatch("xabc"));
 }
 
 test "regex anchor end" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "abc$");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("abc"));
     try std.testing.expect(!try regex.isMatch("abcx"));
 }
 
 test "regex non-capturing group" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "(?:ab)+");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("ab"));
     try std.testing.expect(try regex.isMatch("abab"));
 }
 
 test "regex quantifier" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "a{2,3}");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("aa"));
     try std.testing.expect(try regex.isMatch("aaa"));
     try std.testing.expect(!try regex.isMatch("a"));
@@ -525,10 +525,10 @@ test "regex quantifier" {
 
 test "regex quantifier min only" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "a{2,}");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("aa"));
     try std.testing.expect(try regex.isMatch("aaaa"));
     try std.testing.expect(!try regex.isMatch("a"));
@@ -536,25 +536,25 @@ test "regex quantifier min only" {
 
 test "regex replace" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "a+");
     defer regex.deinit();
-    
+
     const result = try regex.replace("aabbaaa", "X");
     defer allocator.free(result);
-    
+
     try std.testing.expectEqualStrings("Xbbaaa", result);
 }
 
 test "regex split" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, ",");
     defer regex.deinit();
-    
+
     var parts = try regex.split("a,b,c");
     defer parts.deinit(allocator);
-    
+
     try std.testing.expectEqual(@as(usize, 3), parts.items.len);
     try std.testing.expectEqualStrings("a", parts.items[0]);
     try std.testing.expectEqualStrings("b", parts.items[1]);
@@ -563,32 +563,32 @@ test "regex split" {
 
 test "regex named group" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "(?<word>\\w+)");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("hello"));
 }
 
 test "regex options" {
     const allocator = std.testing.allocator;
-    
+
     // Test options object creation
     var regex = try Regex.compileWithOptions(allocator, "hello", .{ .case_sensitive = true });
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatch("hello"));
 }
 
 test "regex matchAll" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "\\d+");
     defer regex.deinit();
-    
+
     var matches = try regex.matchAll("abc 123 def 456 ghi 789");
     defer matches.deinit(allocator);
-    
+
     try std.testing.expectEqual(@as(usize, 3), matches.items.len);
     try std.testing.expectEqualStrings("123", matches.items[0]);
     try std.testing.expectEqualStrings("456", matches.items[1]);
@@ -597,22 +597,22 @@ test "regex matchAll" {
 
 test "regex matchAll no match" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "\\d+");
     defer regex.deinit();
-    
+
     var matches = try regex.matchAll("abc def ghi");
     defer matches.deinit(allocator);
-    
+
     try std.testing.expectEqual(@as(usize, 0), matches.items.len);
 }
 
 test "regex isMatchFull" {
     const allocator = std.testing.allocator;
-    
+
     var regex = try Regex.compile(allocator, "^\\d+$");
     defer regex.deinit();
-    
+
     try std.testing.expect(try regex.isMatchFull("123"));
     try std.testing.expect(!try regex.isMatchFull("abc"));
     try std.testing.expect(!try regex.isMatchFull("123abc"));

@@ -4,26 +4,26 @@ const RegexOptions = @import("options.zig").RegexOptions;
 
 pub const OpCode = enum(u8) {
     // Basic instructions
-    Char,          // match single character
-    String,        // match literal string
-    Any,           // match any character
-    CharClass,     // match character class
-    
+    Char, // match single character
+    String, // match literal string
+    Any, // match any character
+    CharClass, // match character class
+
     // Control flow
-    Split,         // split execution (NFA)
-    Jmp,           // jump
-    Match,         // match success
-    
+    Split, // split execution (NFA)
+    Jmp, // jump
+    Match, // match success
+
     // Grouping
-    Save,          // save capture group position
-    
+    Save, // save capture group position
+
     // Zero-width assertions
     AssertStart,
     AssertEnd,
-    AssertStringStart,       // \A
-    AssertStringEnd,         // \z
+    AssertStringStart, // \A
+    AssertStringEnd, // \z
     AssertStringEndAllowNewline, // \Z
-    AssertMatchStart,        // \G
+    AssertMatchStart, // \G
     AssertForward,
     AssertForwardEnd,
     AssertForwardNegative,
@@ -44,7 +44,7 @@ pub const OpCode = enum(u8) {
     // Atomic groups
     AtomicStart,
     AtomicEnd,
-    
+
     // Unicode properties
     UnicodeProperty,
 
@@ -142,10 +142,10 @@ pub const Instruction = union(OpCode) {
             .AtomicEnd => try writer.print("AtomicEnd", .{}),
             .UnicodeProperty => |p| try writer.print("UnicodeProperty({s}{s})", .{
                 if (p.negated) "P{" else "p{",
-                p.property, 
+                p.property,
             }),
-            .Conditional => |c| try writer.print("Conditional({}) -> {}", .{c.group, c.target}),
-            .SubroutineCall => |s| try writer.print("SubroutineCall({}) -> {}", .{s.group, s.target}),
+            .Conditional => |c| try writer.print("Conditional({}) -> {}", .{ c.group, c.target }),
+            .SubroutineCall => |s| try writer.print("SubroutineCall({}) -> {}", .{ s.group, s.target }),
             .SubroutineReturn => try writer.print("SubroutineReturn", .{}),
             .Newline => try writer.print("Newline", .{}),
             .ResetMatchStart => try writer.print("ResetMatchStart", .{}),
@@ -199,13 +199,13 @@ pub const Bytecode = struct {
         self.instructions.deinit(self.allocator);
         self.assert_ends.deinit(self.allocator);
     }
-    
+
     pub fn emit(self: *Bytecode, inst: Instruction) !usize {
         const idx = self.instructions.items.len;
         try self.instructions.append(self.allocator, inst);
         return idx;
     }
-    
+
     pub fn patch(self: *Bytecode, idx: usize, target: usize) void {
         switch (self.instructions.items[idx]) {
             .Split => |*t| t.* = target,
@@ -215,14 +215,14 @@ pub const Bytecode = struct {
             else => unreachable,
         }
     }
-    
+
     pub fn getPC(self: Bytecode) usize {
         return self.instructions.items.len;
     }
-    
+
     pub fn dump(self: Bytecode, writer: *std.Io.Writer) !void {
         for (self.instructions.items, 0..) |inst, i| {
-            try writer.print("{:3}: {s}\n", .{i, @tagName(inst)});
+            try writer.print("{:3}: {s}\n", .{ i, @tagName(inst) });
         }
     }
 };

@@ -6,17 +6,20 @@ A regular expression engine written in Zig.
 
 - **Core matching**: literals, concatenation, alternation (`|`)
 - **Quantifiers**: `*`, `+`, `?`, `{n,m}`
-- **Character classes**: `[a-z]`, `\d`, `\w`, `\s`, `\D`, `\W`, `\S`
-- **Escape sequences**: `\t`, `\n`, `\r`, `\a` (bell), `\e` (escape), `\f` (form feed), `\v` (vertical tab), `\xNN`, `\x{hhhh}`, `\uNNNN`
+- **Character classes**: `[a-z]`, `\d`, `\w`, `\s`, `\D`, `\W`, `\S`, `\h`, `\H`, POSIX `[:alpha:]`
+- **Escape sequences**: `\t`, `\n`, `\r`, `\a` (bell), `\e` (escape), `\f` (form feed), `\v` (vertical tab), `\xNN`, `\x{hhhh}`, `\uNNNN`, `\N`, `\R`, `\X`, `\b` (backspace in class), `\K`
 - **Unicode properties**: `\p{L}`, `\p{Lu}`, `\p{Ll}`, `\p{N}`, `\p{Nd}`, `\p{P}`, `\p{S}`, `\p{Z}`, `\P{...}`
 - **Unicode scripts**: `\p{Han}`, `\p{Latin}`, `\p{Greek}`, `\p{Cyrillic}`, `\p{Arabic}`, `\p{Hebrew}`, `\p{Armenian}`, `\p{Georgian}`, `\p{Thai}`, `\p{Devanagari}`, `\p{Hiragana}`, `\p{Katakana}`, `\p{Hangul}`
 - **Grapheme clusters**: `\X` matches a single user-perceived character (including combining marks)
-- **Anchors**: `^` (start), `$` (end), `\A`, `\z`, `\Z`
-- **Groups**: capturing `(...)`, non-capturing `(?:...)`, named `(?<name>...)`, atomic `(?>...)`, backrefs `\1`, `\g<name>`, `\k<name>`
+- **Anchors**: `^` (start), `$` (end), `\A`, `\z`, `\Z`, `\G`
+- **Groups**: capturing `(...)`, non-capturing `(?:...)`, named `(?<name>...)`, atomic `(?>)`, branch reset `(?|...)`, backrefs `\1`, `\g<name>`, `\k<name>`, `\g{1}`, `\g{-1}`
 - **Quantifiers**: greedy `*+`, `++`, `?+`, `{n,m}+` (possessive)
-- **Assertions**: lookahead `(?=...)`, `(?!...)`, lookbehind `(?<=...)`, `(?<!...)`
-- **Text operations**: `replace`, `replaceAll`, `split`, `find`, `findAll`
-- **Options**: case sensitivity (ASCII + Unicode), multiline mode, dot-matches-newline, max execution steps (backtracking protection)
+- **Assertions**: lookahead `(?=...)`, `(?!...)`, lookbehind `(?<=...)`, `(?<!...)` (fixed-width)
+- **Subroutine calls**: `(?1)`, `(?&name)`
+- **Conditional patterns**: `(?(1)yes|no)`, `(?(name)yes|no)`
+- **Comments**: `(?#comment)`
+- **Text operations**: `replace`, `replaceAll`, `split`, `find`, `findAll`, `matchAll`
+- **Options**: case sensitivity (ASCII + Unicode), multiline mode, dot-matches-newline, free-spacing, max execution steps (backtracking protection)
 
 ## Usage
 
@@ -36,10 +39,23 @@ try std.testing.expect(try re.isMatch("aab"));
 
 ```zig
 var result = try re.find("abc123def");
-if (result) |*r| {
-    defer r.deinit();
+if (result) |r| {
     const match = r.getGroup("abc123def", 0);
 }
+```
+
+### Convenience Functions
+
+The module also provides one-shot convenience functions that compile, execute, and deinit in one call. **These recompile the pattern on every call** — for repeated use, compile once and reuse the `Regex` object:
+
+```zig
+// One-shot (compiles pattern each time)
+const matched = try regex.isMatch(allocator, "hello", "hello world");
+
+// Better: compile once, match many
+var re = try regex.compile(allocator, "hello");
+defer re.deinit();
+const matched = try re.isMatch("hello world");
 ```
 
 ### Replace
@@ -60,12 +76,12 @@ var re = try regex.compile(allocator, ",");
 defer re.deinit();
 
 var parts = try re.split("a,b,c");
-defer parts.deinit(allocator);
+defer parts.deinit();
 // parts == ["a", "b", "c"]
 
 // Split with a limit
 var parts2 = try re.splitLimit("a,b,c,d", 2);
-defer parts2.deinit(allocator);
+defer parts2.deinit();
 // parts2 == ["a", "b", "c,d"]
 ```
 
@@ -77,6 +93,13 @@ var re = try regex.compileWithOptions(allocator, "hello", .{
 });
 defer re.deinit();
 ```
+
+Available options:
+- `case_sensitive` — Enable case-sensitive matching (default: `true`)
+- `multiline` — `^`/`$` match each line (default: `false`)
+- `dot_matches_newline` — `.` matches `\n` (default: `false`)
+- `free_spacing` — Ignore whitespace and allow `#` comments (default: `false`)
+- `max_steps` — Backtracking limit (default: `1_000_000`, `null` for unlimited)
 
 ### Backtracking Protection
 

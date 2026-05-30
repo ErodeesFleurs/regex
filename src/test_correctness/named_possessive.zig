@@ -13,7 +13,7 @@ test "named capture group basic" {
         try std.testing.expect(r.matched);
         try std.testing.expectEqualStrings("hello", r.getGroup("hello world", 0).?);
         try std.testing.expectEqualStrings("hello", r.getGroup("hello world", 1).?);
-        try std.testing.expectEqualStrings("hello", re.getCaptureGroup(r.*, "hello world", "word").?);
+        try std.testing.expectEqualStrings("hello", re.getCaptureGroup(r, "hello world", "word").?);
     } else {
         try std.testing.expect(false);
     }
@@ -28,7 +28,7 @@ test "named capture group Python syntax" {
     if (result) |*r| {
         defer r.deinit();
         try std.testing.expect(r.matched);
-        try std.testing.expectEqualStrings("123", re.getCaptureGroup(r.*, "abc123def", "digit").?);
+        try std.testing.expectEqualStrings("123", re.getCaptureGroup(r, "abc123def", "digit").?);
     } else {
         try std.testing.expect(false);
     }
@@ -43,8 +43,8 @@ test "named capture group multiple" {
     if (result) |*r| {
         defer r.deinit();
         try std.testing.expect(r.matched);
-        try std.testing.expectEqualStrings("John", re.getCaptureGroup(r.*, "John Doe", "first").?);
-        try std.testing.expectEqualStrings("Doe", re.getCaptureGroup(r.*, "John Doe", "last").?);
+        try std.testing.expectEqualStrings("John", re.getCaptureGroup(r, "John Doe", "first").?);
+        try std.testing.expectEqualStrings("Doe", re.getCaptureGroup(r, "John Doe", "last").?);
     } else {
         try std.testing.expect(false);
     }

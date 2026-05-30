@@ -10,44 +10,44 @@ pub const NodeType = enum {
     Alternate, // alternation (a|b)
     Star, // zero or more (a*)
     Plus, // one or more (a+)
-    Question,      // zero or one (a?)
-    Quantifier,    // {n,m} quantifier
-    LazyStar,      // lazy zero or more (a*?)
-    LazyPlus,      // lazy one or more (a+?)
-    LazyQuestion,  // lazy zero or one (a??)
+    Question, // zero or one (a?)
+    Quantifier, // {n,m} quantifier
+    LazyStar, // lazy zero or more (a*?)
+    LazyPlus, // lazy one or more (a+?)
+    LazyQuestion, // lazy zero or one (a??)
     LazyQuantifier, // lazy {n,m} quantifier
-    PossessiveStar,     // possessive zero or more (a*+)
-    PossessivePlus,     // possessive one or more (a++)
+    PossessiveStar, // possessive zero or more (a*+)
+    PossessivePlus, // possessive one or more (a++)
     PossessiveQuestion, // possessive zero or one (a?+)
     PossessiveQuantifier, // possessive {n,m} quantifier
-    Group,         // capturing group ((...))
-    Any,           // any character (.)
-    CharClass,     // character class ([...])
-    AssertStart,   // start anchor (^)
-    AssertEnd,     // end anchor ($)
-    AssertStringStart,       // \A
-    AssertStringEnd,         // \z
+    Group, // capturing group ((...))
+    Any, // any character (.)
+    CharClass, // character class ([...])
+    AssertStart, // start anchor (^)
+    AssertEnd, // end anchor ($)
+    AssertStringStart, // \A
+    AssertStringEnd, // \z
     AssertStringEndAllowNewline, // \Z
-    AssertMatchStart,        // \G
-    AssertForward,      // positive lookahead (?=...)
+    AssertMatchStart, // \G
+    AssertForward, // positive lookahead (?=...)
     AssertForwardNegative, // negative lookahead (?!...)
-    AssertBackward,     // positive lookbehind (?<=...)
+    AssertBackward, // positive lookbehind (?<=...)
     AssertBackwardNegative, // negative lookbehind (?<!...)
-    InlineFlag,    // inline flag (?i:...)
-    AtomicGroup,   // atomic group (?>...)
-    Backref,       // backreference \1, \2, ...
-    WordBoundary,     // word boundary \b
-    NotWordBoundary,  // non-word boundary \B
-    UnicodeProperty,     // Unicode property \p{...}
-    NotUnicodeProperty,  // negated Unicode property \P{...}
-    GraphemeCluster,     // grapheme cluster \X
-    Conditional,   // conditional (?(n)yes|no)
+    InlineFlag, // inline flag (?i:...)
+    AtomicGroup, // atomic group (?>...)
+    Backref, // backreference \1, \2, ...
+    WordBoundary, // word boundary \b
+    NotWordBoundary, // non-word boundary \B
+    UnicodeProperty, // Unicode property \p{...}
+    NotUnicodeProperty, // negated Unicode property \P{...}
+    GraphemeCluster, // grapheme cluster \X
+    Conditional, // conditional (?(n)yes|no)
     SubroutineCall, // subroutine call (?1) or (?&name)
-    Newline,       // newline sequence \R
+    Newline, // newline sequence \R
     ResetMatchStart, // \K reset match start
-    NotNewline,    // \N not newline
+    NotNewline, // \N not newline
     NotVerticalWhitespace, // \V not vertical whitespace
-    Empty,         // empty expression
+    Empty, // empty expression
 };
 
 pub const AstNode = struct {
@@ -85,7 +85,7 @@ pub const AstNode = struct {
         }
         if (self.char_class) |*cc| {
             if (!self.char_class_transferred) {
-                cc.deinit(allocator);
+                cc.deinit();
             }
         }
     }
@@ -137,8 +137,7 @@ pub const CharClass = struct {
         };
     }
 
-    pub fn deinit(self: *CharClass, allocator: std.mem.Allocator) void {
-        _ = allocator;
+    pub fn deinit(self: *CharClass) void {
         for (self.posix_classes.items) |name| {
             self.allocator.free(name);
         }
@@ -179,7 +178,7 @@ pub const CharClass = struct {
             'd' => try self.addRange('0', '9'),
             'D' => {
                 try self.addRange(0, '/' - 1);
-                try self.addRange(':' , 255);
+                try self.addRange(':', 255);
             },
             'w' => {
                 try self.addRange('a', 'z');
@@ -268,8 +267,6 @@ fn isPosixClass(ch: u8, name: []const u8) bool {
                 std.ascii.isAlphabetic(ch)
             else if (class_name.len == 5 and class_name[2] == 'n' and class_name[3] == 'u' and class_name[4] == 'm')
                 std.ascii.isAlphanumeric(ch)
-            else if (class_name.len == 5 and class_name[2] == 'p' and class_name[3] == 'h' and class_name[4] == 'a')
-                std.ascii.isAlphabetic(ch)
             else if (class_name.len == 5 and class_name[2] == 's' and class_name[3] == 'c' and class_name[4] == 'i')
                 ch < 128
             else
@@ -522,10 +519,10 @@ pub const Parser = struct {
             else => return primary,
         }
     }
-    
+
     fn parseQuantifier(self: *Parser, primary: *AstNode) ParserError!?*AstNode {
         _ = self.tokenizer.nextToken(); // consume '{'
-        
+
         // Parse minimum value (supports multiple digits)
         var min_buf: [64]u8 = undefined;
         var min_len: usize = 0;
@@ -549,10 +546,10 @@ pub const Parser = struct {
             return error.InvalidQuantifier;
         }
         const min = try std.fmt.parseInt(usize, min_buf[0..min_len], 10);
-        
+
         const next = self.tokenizer.peek();
         var max: ?usize = min;
-        
+
         if (next.type == .Literal and next.value.len == 1 and next.value[0] == ',') {
             _ = self.tokenizer.nextToken(); // consume ','
             const after_comma = self.tokenizer.peek();
@@ -585,7 +582,7 @@ pub const Parser = struct {
                 max = try std.fmt.parseInt(usize, max_buf[0..max_len], 10);
             }
         }
-        
+
         _ = self.tokenizer.expect(.RBrace) catch {
             self.setErrorAtToken("Expected }", self.tokenizer.peek());
             return error.UnexpectedToken;
@@ -860,7 +857,7 @@ pub const Parser = struct {
         }
 
         var cc = CharClass.init(self.allocator, negated);
-        errdefer cc.deinit(self.allocator);
+        errdefer cc.deinit();
 
         while (true) {
             const t = self.tokenizer.peek();
@@ -878,7 +875,7 @@ pub const Parser = struct {
 
             // Unicode property inside character class: \p{...} or \P{...}
             if (t.type == .UnicodeProperty or t.type == .NotUnicodeProperty) {
-                const prop_name = t.value[3..t.value.len - 1]; // skip \p{ and }
+                const prop_name = t.value[3 .. t.value.len - 1]; // skip \p{ and }
                 try cc.addUnicodeProperty(prop_name, t.type == .NotUnicodeProperty);
                 continue;
             }
@@ -893,35 +890,15 @@ pub const Parser = struct {
                     _ = self.tokenizer.nextToken();
 
                     // Read the class name
-                    const name_start: usize = self.tokenizer.position;
-                    var name_end: usize = name_start;
-                    var found_end = false;
-                    while (self.tokenizer.position < self.tokenizer.input.len) {
-                        const ch = self.tokenizer.input[self.tokenizer.position];
-                        if (ch == ':' and self.tokenizer.position + 1 < self.tokenizer.input.len and self.tokenizer.input[self.tokenizer.position + 1] == ']') {
-                            found_end = true;
-                            name_end = self.tokenizer.position;
-                            // Consume ':]'
-                            self.tokenizer.position += 2;
-                            break;
-                        }
-                        self.tokenizer.position += 1;
-                    }
-
-                    if (found_end and name_end > name_start) {
-                        const name = self.tokenizer.input[name_start..name_end];
-                        if (name.len > 0 and name[0] == '^') {
+                    const name = self.tokenizer.scanPosixClassName();
+                    if (name) |n| {
+                        if (n.len > 0) {
                             // Negated POSIX class: add with ^ prefix for isPosixClass to handle
-                            try cc.addPosixClass(name);
-                        } else {
-                            try cc.addPosixClass(name);
+                            try cc.addPosixClass(n);
+                            continue;
                         }
-                        continue;
-                    } else {
-                        // Not a valid POSIX class, rewind and treat ':' and '[' as literal chars
-                        self.tokenizer.position = name_start;
-                        // Fall through to normal literal handling for ':' and '['
                     }
+                    // Not a valid POSIX class; fall through to normal literal handling for ':' and '['
                 }
             }
 
@@ -1054,9 +1031,9 @@ pub const Parser = struct {
 
     fn parseGroup(self: *Parser) ParserError!?*AstNode {
         _ = self.tokenizer.nextToken(); // consume '('
-        
+
         const next_token = self.tokenizer.peek();
-        
+
         if (next_token.type == .Question) {
             _ = self.tokenizer.nextToken(); // consume '?'
             const special = self.tokenizer.peek();
@@ -1282,10 +1259,22 @@ pub const Parser = struct {
 
         // Process the first flag character (already in `special`)
         switch (special.value[0]) {
-            'i' => { opts.case_sensitive = false; flag_bits |= 1; },
-            'm' => { opts.multiline = true; flag_bits |= 2; },
-            's' => { opts.dot_matches_newline = true; flag_bits |= 4; },
-            'x' => { opts.free_spacing = true; flag_bits |= 8; },
+            'i' => {
+                opts.case_sensitive = false;
+                flag_bits |= 1;
+            },
+            'm' => {
+                opts.multiline = true;
+                flag_bits |= 2;
+            },
+            's' => {
+                opts.dot_matches_newline = true;
+                flag_bits |= 4;
+            },
+            'x' => {
+                opts.free_spacing = true;
+                flag_bits |= 8;
+            },
             else => unreachable,
         }
 
@@ -1297,10 +1286,22 @@ pub const Parser = struct {
                 if (ch == 'i' or ch == 'm' or ch == 's' or ch == 'x') {
                     _ = self.tokenizer.nextToken();
                     switch (ch) {
-                        'i' => { opts.case_sensitive = false; flag_bits |= 1; },
-                        'm' => { opts.multiline = true; flag_bits |= 2; },
-                        's' => { opts.dot_matches_newline = true; flag_bits |= 4; },
-                        'x' => { opts.free_spacing = true; flag_bits |= 8; },
+                        'i' => {
+                            opts.case_sensitive = false;
+                            flag_bits |= 1;
+                        },
+                        'm' => {
+                            opts.multiline = true;
+                            flag_bits |= 2;
+                        },
+                        's' => {
+                            opts.dot_matches_newline = true;
+                            flag_bits |= 4;
+                        },
+                        'x' => {
+                            opts.free_spacing = true;
+                            flag_bits |= 8;
+                        },
                         else => unreachable,
                     }
                     continue;
@@ -1316,6 +1317,7 @@ pub const Parser = struct {
             const old_free_spacing = self.tokenizer.free_spacing;
             if (flag_bits & 8 != 0) {
                 self.tokenizer.free_spacing = true;
+                errdefer self.tokenizer.free_spacing = old_free_spacing;
             }
             const inner = try self.parseExpression() orelse {
                 self.setErrorAtToken("Empty group", self.tokenizer.peek());

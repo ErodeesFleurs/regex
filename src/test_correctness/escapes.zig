@@ -235,4 +235,3 @@ test "escape: [\\b] backspace in char class" {
     try std.testing.expect(!try regex.isMatch(allocator, "[\\b]", "b"));
     try std.testing.expect(!try regex.isMatch(allocator, "[\\b]", "A"));
 }
-

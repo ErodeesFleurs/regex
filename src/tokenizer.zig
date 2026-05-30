@@ -3,71 +3,71 @@ const std = @import("std");
 pub const TokenType = enum {
     // Literal character
     Literal,
-    
+
     // Metacharacters
-    Dot,           // .
-    Star,          // *
-    Plus,          // +
-    Question,      // ?
-    Pipe,          // |
-    
+    Dot, // .
+    Star, // *
+    Plus, // +
+    Question, // ?
+    Pipe, // |
+
     // Grouping
-    LParen,        // (
-    RParen,        // )
-    
+    LParen, // (
+    RParen, // )
+
     // Anchors
-    Caret,         // ^
-    Dollar,        // $
-    AssertStringStart,       // \A
-    AssertStringEnd,         // \z
+    Caret, // ^
+    Dollar, // $
+    AssertStringStart, // \A
+    AssertStringEnd, // \z
     AssertStringEndAllowNewline, // \Z
-    AssertMatchStart,        // \G
-    
+    AssertMatchStart, // \G
+
     // Escape sequences
-    Backslash,     // \
-    
+    Backslash, // \
+
     // Special character classes
-    Digit,         // \d
-    NotDigit,      // \D
-    Word,          // \w
-    NotWord,       // \W
-    Whitespace,    // \s
+    Digit, // \d
+    NotDigit, // \D
+    Word, // \w
+    NotWord, // \W
+    Whitespace, // \s
     NotWhitespace, // \S
-    HorizontalWhitespace,    // \h
+    HorizontalWhitespace, // \h
     NotHorizontalWhitespace, // \H
-    
+
     // Word boundaries
-    WordBoundary,     // \b
-    NotWordBoundary,  // \B
-    
+    WordBoundary, // \b
+    NotWordBoundary, // \B
+
     // Backreferences
-    Backref,       // \1, \2, ...
-    NamedBackref,  // \g<name>, \k<name>
-    
+    Backref, // \1, \2, ...
+    NamedBackref, // \g<name>, \k<name>
+
     // Unicode properties
-    UnicodeProperty,     // \p{...}
-    NotUnicodeProperty,  // \P{...}
-    
+    UnicodeProperty, // \p{...}
+    NotUnicodeProperty, // \P{...}
+
     // Quantifiers
-    LBrace,        // {
-    RBrace,        // }
-    Comma,         // ,
-    
+    LBrace, // {
+    RBrace, // }
+    Comma, // ,
+
     // Character classes
-    LBracket,      // [
-    RBracket,      // ]
-    
+    LBracket, // [
+    RBracket, // ]
+
     // Grapheme cluster
-    GraphemeCluster,  // \X
+    GraphemeCluster, // \X
 
     // Newline sequence
-    Newline,          // \R
+    Newline, // \R
 
     // Reset match start
-    ResetMatchStart,  // \K
+    ResetMatchStart, // \K
 
     // Not newline
-    NotNewline,       // \N
+    NotNewline, // \N
 
     // Not vertical whitespace
     NotVerticalWhitespace, // \V
@@ -81,7 +81,7 @@ pub const Token = struct {
     type: TokenType,
     value: []const u8,
     position: usize,
-    
+
     pub fn format(self: Token, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("Token{{ .type = {s}, .value = \"{s}\", .position = {} }}", .{
             @tagName(self.type),
@@ -121,7 +121,7 @@ pub const Tokenizer = struct {
     fn makeInvalidToken(self: *Tokenizer, start_pos: usize) Token {
         return .{
             .type = .Invalid,
-            .value = self.input[start_pos..self.position + 1],
+            .value = self.input[start_pos .. self.position + 1],
             .position = start_pos,
         };
     }
@@ -157,7 +157,7 @@ pub const Tokenizer = struct {
 
             return .{
                 .type = .Literal,
-                .value = self.input[self.position - 1..self.position],
+                .value = self.input[self.position - 1 .. self.position],
                 .position = self.position - 1,
             };
         }
@@ -197,29 +197,29 @@ pub const Tokenizer = struct {
         if (ch == '\\' and self.position < self.input.len) {
             const next_ch = self.input[self.position];
 
-                // Hex escape: \xNN or \x{hhhh}
-                if (next_ch == 'x') {
-                    if (self.position + 1 < self.input.len and self.input[self.position + 1] == '{') {
-                        // \x{hhhh} format
-                        var hex_end = self.position + 2;
-                        while (hex_end < self.input.len and std.ascii.isHex(self.input[hex_end])) {
-                            hex_end += 1;
-                        }
-                        if (hex_end < self.input.len and self.input[hex_end] == '}' and hex_end > self.position + 2) {
-                            self.position = hex_end + 1;
-                            return self.makeToken(.Literal, start_pos);
-                        }
-                        return self.makeInvalidToken(start_pos);
+            // Hex escape: \xNN or \x{hhhh}
+            if (next_ch == 'x') {
+                if (self.position + 1 < self.input.len and self.input[self.position + 1] == '{') {
+                    // \x{hhhh} format
+                    var hex_end = self.position + 2;
+                    while (hex_end < self.input.len and std.ascii.isHex(self.input[hex_end])) {
+                        hex_end += 1;
                     }
-                    if (self.position + 2 < self.input.len and
-                        std.ascii.isHex(self.input[self.position + 1]) and
-                        std.ascii.isHex(self.input[self.position + 2]))
-                    {
-                        self.position += 3;
+                    if (hex_end < self.input.len and self.input[hex_end] == '}' and hex_end > self.position + 2) {
+                        self.position = hex_end + 1;
                         return self.makeToken(.Literal, start_pos);
                     }
                     return self.makeInvalidToken(start_pos);
                 }
+                if (self.position + 2 < self.input.len and
+                    std.ascii.isHex(self.input[self.position + 1]) and
+                    std.ascii.isHex(self.input[self.position + 2]))
+                {
+                    self.position += 3;
+                    return self.makeToken(.Literal, start_pos);
+                }
+                return self.makeInvalidToken(start_pos);
+            }
 
             // Unicode escape: \uNNNN or \u{hhhh}
             if (next_ch == 'u') {
@@ -386,7 +386,7 @@ pub const Tokenizer = struct {
 
             return self.makeToken(token_type, start_pos);
         }
-        
+
         const token_type: TokenType = switch (ch) {
             '.' => .Dot,
             '*' => .Star,
@@ -427,20 +427,39 @@ pub const Tokenizer = struct {
 
         return self.makeToken(token_type, start_pos);
     }
-    
+
     pub fn peek(self: *Tokenizer) Token {
         if (self.peeked_token == null) {
             self.peeked_token = self.nextTokenInternal();
         }
         return self.peeked_token.?;
     }
-    
+
     pub fn expect(self: *Tokenizer, expected: TokenType) !Token {
         const token = self.nextToken();
         if (token.type != expected) {
             return error.UnexpectedToken;
         }
         return token;
+    }
+
+    /// Scan for a POSIX class name terminated by ':]'.
+    /// Returns the name slice (excluding ':]') and advances past the terminator.
+    /// If no terminator is found, rewinds position and returns null.
+    pub fn scanPosixClassName(self: *Tokenizer) ?[]const u8 {
+        const name_start = self.position;
+        while (self.position < self.input.len) {
+            const ch = self.input[self.position];
+            if (ch == ':' and self.position + 1 < self.input.len and self.input[self.position + 1] == ']') {
+                const name = self.input[name_start..self.position];
+                self.position += 2; // consume ':]'
+                return name;
+            }
+            self.position += 1;
+        }
+        // No terminator found; rewind to avoid consuming the opening '[:'
+        self.position = name_start;
+        return null;
     }
 };
 
@@ -453,49 +472,49 @@ pub const TokenizerError = error{
 
 test "tokenizer basic" {
     var tokenizer = Tokenizer.init("a*b|c");
-    
+
     const t1 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t1.type);
     try std.testing.expectEqualStrings("a", t1.value);
-    
+
     const t2 = tokenizer.nextToken();
     try std.testing.expectEqual(.Star, t2.type);
-    
+
     const t3 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t3.type);
     try std.testing.expectEqualStrings("b", t3.value);
-    
+
     const t4 = tokenizer.nextToken();
     try std.testing.expectEqual(.Pipe, t4.type);
-    
+
     const t5 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t5.type);
     try std.testing.expectEqualStrings("c", t5.value);
-    
+
     const t6 = tokenizer.nextToken();
     try std.testing.expectEqual(.EOF, t6.type);
 }
 
 test "tokenizer escape sequences" {
     var tokenizer = Tokenizer.init("\\d\\w\\s");
-    
+
     const t1 = tokenizer.nextToken();
     try std.testing.expectEqual(.Digit, t1.type);
-    
+
     const t2 = tokenizer.nextToken();
     try std.testing.expectEqual(.Word, t2.type);
-    
+
     const t3 = tokenizer.nextToken();
     try std.testing.expectEqual(.Whitespace, t3.type);
 }
 
 test "tokenizer special chars as literals" {
     var tokenizer = Tokenizer.init("\\.\\*\\+");
-    
+
     const t1 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t1.type);
     try std.testing.expectEqualStrings("\\.", t1.value);
-    
+
     const t2 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t2.type);
     try std.testing.expectEqualStrings("\\*", t2.value);
@@ -503,34 +522,34 @@ test "tokenizer special chars as literals" {
 
 test "tokenizer literal quote" {
     var tokenizer = Tokenizer.init("\\Qa.b*c\\E+");
-    
+
     const t1 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t1.type);
     try std.testing.expectEqualStrings("a", t1.value);
-    
+
     const t2 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t2.type);
     try std.testing.expectEqualStrings(".", t2.value);
-    
+
     const t3 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t3.type);
     try std.testing.expectEqualStrings("b", t3.value);
-    
+
     const t4 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t4.type);
     try std.testing.expectEqualStrings("*", t4.value);
-    
+
     const t5 = tokenizer.nextToken();
     try std.testing.expectEqual(.Literal, t5.type);
     try std.testing.expectEqualStrings("c", t5.value);
-    
+
     const t6 = tokenizer.nextToken();
     try std.testing.expectEqual(.Plus, t6.type);
 }
 
 test "tokenizer literal quote with empty content" {
     var tokenizer = Tokenizer.init("\\Q\\E+");
-    
+
     const t1 = tokenizer.nextToken();
     try std.testing.expectEqual(.Plus, t1.type);
 }

@@ -20,13 +20,13 @@ fn expectFindAll(allocator: std.mem.Allocator, pattern: []const u8, text: []cons
 
 test "findAll: simple literal" {
     const allocator = std.testing.allocator;
-    try expectFindAll(allocator, "a", "aabbaa", &.{"a", "a", "a", "a"});
-    try expectFindAll(allocator, "ab", "abab", &.{"ab", "ab"});
+    try expectFindAll(allocator, "a", "aabbaa", &.{ "a", "a", "a", "a" });
+    try expectFindAll(allocator, "ab", "abab", &.{ "ab", "ab" });
 }
 
 test "findAll: quantifier" {
     const allocator = std.testing.allocator;
-    try expectFindAll(allocator, "a+", "aabbaaa", &.{"aa", "aaa"});
+    try expectFindAll(allocator, "a+", "aabbaaa", &.{ "aa", "aaa" });
 }
 
 test "findAll: no match" {

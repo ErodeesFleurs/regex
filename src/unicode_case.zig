@@ -90,116 +90,385 @@ pub fn foldCase(cp: u21, out: *[4]u21) usize {
 
     // Latin Extended-B (U+0180 - U+024F)
     // Only map uppercase -> lowercase
-    if (cp == 0x0180) { out[0] = cp; return 1; }
-    if (cp == 0x0181) { out[0] = 0x0253; return 1; }
-    if (cp == 0x0182) { out[0] = 0x0183; return 1; }
-    if (cp == 0x0183) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x0184) { out[0] = 0x0185; return 1; }
-    if (cp == 0x0185) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x0186) { out[0] = 0x0254; return 1; }
-    if (cp == 0x0187) { out[0] = 0x0188; return 1; }
-    if (cp == 0x0188) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x0189) { out[0] = 0x0256; return 1; }
-    if (cp == 0x018A) { out[0] = 0x0257; return 1; }
-    if (cp == 0x018B) { out[0] = 0x018C; return 1; }
-    if (cp == 0x018C) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x018D) { out[0] = cp; return 1; }
-    if (cp == 0x018E) { out[0] = 0x01DD; return 1; }
-    if (cp == 0x018F) { out[0] = 0x0259; return 1; }
-    if (cp == 0x0190) { out[0] = 0x025B; return 1; }
-    if (cp == 0x0191) { out[0] = 0x0192; return 1; }
-    if (cp == 0x0192) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x0193) { out[0] = 0x0260; return 1; }
-    if (cp == 0x0194) { out[0] = 0x0263; return 1; }
-    if (cp == 0x0195) { out[0] = cp; return 1; }
-    if (cp == 0x0196) { out[0] = 0x0269; return 1; }
-    if (cp == 0x0197) { out[0] = 0x0268; return 1; }
-    if (cp == 0x0198) { out[0] = 0x0199; return 1; }
-    if (cp == 0x0199) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x019A) { out[0] = cp; return 1; }
-    if (cp == 0x019B) { out[0] = cp; return 1; }
-    if (cp == 0x019C) { out[0] = 0x026F; return 1; }
-    if (cp == 0x019D) { out[0] = 0x0272; return 1; }
-    if (cp == 0x019E) { out[0] = cp; return 1; }
-    if (cp == 0x019F) { out[0] = 0x0275; return 1; }
-    if (cp >= 0x01A0 and cp <= 0x01A5) {
-        if (cp % 2 == 0) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+    if (cp == 0x0180) {
+        out[0] = cp;
+        return 1;
     }
-    if (cp == 0x01A6) { out[0] = 0x0280; return 1; }
-    if (cp == 0x01A7) { out[0] = 0x01A8; return 1; }
-    if (cp == 0x01A8) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x01A9) { out[0] = 0x0283; return 1; }
-    if (cp == 0x01AA) { out[0] = cp; return 1; }
-    if (cp == 0x01AB) { out[0] = cp; return 1; }
-    if (cp == 0x01AC) { out[0] = 0x01AD; return 1; }
-    if (cp == 0x01AD) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x01AE) { out[0] = 0x0288; return 1; }
-    if (cp == 0x01AF) { out[0] = 0x01B0; return 1; }
-    if (cp == 0x01B0) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x01B1) { out[0] = 0x028A; return 1; }
-    if (cp == 0x01B2) { out[0] = 0x028B; return 1; }
-    if (cp == 0x01B3) { out[0] = 0x01B4; return 1; }
-    if (cp == 0x01B4) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x01B5) { out[0] = 0x01B6; return 1; }
-    if (cp == 0x01B6) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x01B7) { out[0] = 0x0292; return 1; }
-    if (cp == 0x01B8) { out[0] = 0x01B9; return 1; }
-    if (cp == 0x01B9) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x01BA) { out[0] = cp; return 1; }
-    if (cp == 0x01BB) { out[0] = cp; return 1; }
-    if (cp == 0x01BC) { out[0] = 0x01BD; return 1; }
-    if (cp == 0x01BD) { out[0] = cp; return 1; } // lowercase
-    if (cp >= 0x01BE and cp <= 0x01BF) { out[0] = cp; return 1; }
-    if (cp == 0x01C0) { out[0] = cp; return 1; }
-    if (cp == 0x01C1) { out[0] = cp; return 1; }
-    if (cp == 0x01C2) { out[0] = cp; return 1; }
-    if (cp == 0x01C3) { out[0] = cp; return 1; }
+    if (cp == 0x0181) {
+        out[0] = 0x0253;
+        return 1;
+    }
+    if (cp == 0x0182) {
+        out[0] = 0x0183;
+        return 1;
+    }
+    if (cp == 0x0183) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x0184) {
+        out[0] = 0x0185;
+        return 1;
+    }
+    if (cp == 0x0185) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x0186) {
+        out[0] = 0x0254;
+        return 1;
+    }
+    if (cp == 0x0187) {
+        out[0] = 0x0188;
+        return 1;
+    }
+    if (cp == 0x0188) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x0189) {
+        out[0] = 0x0256;
+        return 1;
+    }
+    if (cp == 0x018A) {
+        out[0] = 0x0257;
+        return 1;
+    }
+    if (cp == 0x018B) {
+        out[0] = 0x018C;
+        return 1;
+    }
+    if (cp == 0x018C) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x018D) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x018E) {
+        out[0] = 0x01DD;
+        return 1;
+    }
+    if (cp == 0x018F) {
+        out[0] = 0x0259;
+        return 1;
+    }
+    if (cp == 0x0190) {
+        out[0] = 0x025B;
+        return 1;
+    }
+    if (cp == 0x0191) {
+        out[0] = 0x0192;
+        return 1;
+    }
+    if (cp == 0x0192) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x0193) {
+        out[0] = 0x0260;
+        return 1;
+    }
+    if (cp == 0x0194) {
+        out[0] = 0x0263;
+        return 1;
+    }
+    if (cp == 0x0195) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x0196) {
+        out[0] = 0x0269;
+        return 1;
+    }
+    if (cp == 0x0197) {
+        out[0] = 0x0268;
+        return 1;
+    }
+    if (cp == 0x0198) {
+        out[0] = 0x0199;
+        return 1;
+    }
+    if (cp == 0x0199) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x019A) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x019B) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x019C) {
+        out[0] = 0x026F;
+        return 1;
+    }
+    if (cp == 0x019D) {
+        out[0] = 0x0272;
+        return 1;
+    }
+    if (cp == 0x019E) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x019F) {
+        out[0] = 0x0275;
+        return 1;
+    }
+    if (cp >= 0x01A0 and cp <= 0x01A5) {
+        if (cp % 2 == 0) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
+    }
+    if (cp == 0x01A6) {
+        out[0] = 0x0280;
+        return 1;
+    }
+    if (cp == 0x01A7) {
+        out[0] = 0x01A8;
+        return 1;
+    }
+    if (cp == 0x01A8) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x01A9) {
+        out[0] = 0x0283;
+        return 1;
+    }
+    if (cp == 0x01AA) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01AB) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01AC) {
+        out[0] = 0x01AD;
+        return 1;
+    }
+    if (cp == 0x01AD) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x01AE) {
+        out[0] = 0x0288;
+        return 1;
+    }
+    if (cp == 0x01AF) {
+        out[0] = 0x01B0;
+        return 1;
+    }
+    if (cp == 0x01B0) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x01B1) {
+        out[0] = 0x028A;
+        return 1;
+    }
+    if (cp == 0x01B2) {
+        out[0] = 0x028B;
+        return 1;
+    }
+    if (cp == 0x01B3) {
+        out[0] = 0x01B4;
+        return 1;
+    }
+    if (cp == 0x01B4) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x01B5) {
+        out[0] = 0x01B6;
+        return 1;
+    }
+    if (cp == 0x01B6) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x01B7) {
+        out[0] = 0x0292;
+        return 1;
+    }
+    if (cp == 0x01B8) {
+        out[0] = 0x01B9;
+        return 1;
+    }
+    if (cp == 0x01B9) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x01BA) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01BB) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01BC) {
+        out[0] = 0x01BD;
+        return 1;
+    }
+    if (cp == 0x01BD) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp >= 0x01BE and cp <= 0x01BF) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01C0) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01C1) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01C2) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01C3) {
+        out[0] = cp;
+        return 1;
+    }
     if (cp >= 0x01C4 and cp <= 0x01CC) {
         // Titlecase/Uppercase -> lowercase
         switch (cp) {
-            0x01C4 => { out[0] = 0x01C6; return 1; },
-            0x01C5 => { out[0] = 0x01C6; return 1; },
-            0x01C7 => { out[0] = 0x01C9; return 1; },
-            0x01C8 => { out[0] = 0x01C9; return 1; },
-            0x01CA => { out[0] = 0x01CC; return 1; },
-            0x01CB => { out[0] = 0x01CC; return 1; },
-            else => { out[0] = cp; return 1; }, // lowercase
+            0x01C4 => {
+                out[0] = 0x01C6;
+                return 1;
+            },
+            0x01C5 => {
+                out[0] = 0x01C6;
+                return 1;
+            },
+            0x01C7 => {
+                out[0] = 0x01C9;
+                return 1;
+            },
+            0x01C8 => {
+                out[0] = 0x01C9;
+                return 1;
+            },
+            0x01CA => {
+                out[0] = 0x01CC;
+                return 1;
+            },
+            0x01CB => {
+                out[0] = 0x01CC;
+                return 1;
+            },
+            else => {
+                out[0] = cp;
+                return 1;
+            }, // lowercase
         }
     }
     if (cp >= 0x01CD and cp <= 0x01DC) {
-        if (cp % 2 == 1) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 1) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
-    if (cp == 0x01DD) { out[0] = cp; return 1; } // lowercase
+    if (cp == 0x01DD) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
     if (cp >= 0x01DE and cp <= 0x01EF) {
-        if (cp % 2 == 0) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 0) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
-    if (cp == 0x01F0) { out[0] = cp; return 1; }
-    if (cp == 0x01F1) { out[0] = 0x01F3; return 1; }
-    if (cp == 0x01F2) { out[0] = 0x01F3; return 1; }
-    if (cp == 0x01F3) { out[0] = cp; return 1; } // lowercase
-    if (cp == 0x01F4) { out[0] = 0x01F5; return 1; }
-    if (cp == 0x01F5) { out[0] = cp; return 1; } // lowercase
-    if (cp >= 0x01F6 and cp <= 0x01F8) { out[0] = cp; return 1; }
+    if (cp == 0x01F0) {
+        out[0] = cp;
+        return 1;
+    }
+    if (cp == 0x01F1) {
+        out[0] = 0x01F3;
+        return 1;
+    }
+    if (cp == 0x01F2) {
+        out[0] = 0x01F3;
+        return 1;
+    }
+    if (cp == 0x01F3) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp == 0x01F4) {
+        out[0] = 0x01F5;
+        return 1;
+    }
+    if (cp == 0x01F5) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
+    if (cp >= 0x01F6 and cp <= 0x01F8) {
+        out[0] = cp;
+        return 1;
+    }
     if (cp >= 0x01F9 and cp <= 0x021F) {
-        if (cp % 2 == 1) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 1) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
-    if (cp == 0x0220) { out[0] = cp; return 1; }
+    if (cp == 0x0220) {
+        out[0] = cp;
+        return 1;
+    }
     if (cp >= 0x0222 and cp <= 0x0233) {
-        if (cp % 2 == 0) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 0) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
-    if (cp >= 0x0234 and cp <= 0x023F) { out[0] = cp; return 1; }
+    if (cp >= 0x0234 and cp <= 0x023F) {
+        out[0] = cp;
+        return 1;
+    }
     if (cp >= 0x0240 and cp <= 0x024F) {
         switch (cp) {
-            0x0241 => { out[0] = 0x0242; return 1; },
-            0x0243 => { out[0] = 0x0180; return 1; },
-            0x0244 => { out[0] = 0x0289; return 1; },
-            0x0245 => { out[0] = 0x028C; return 1; },
-            else => { out[0] = cp; return 1; },
+            0x0241 => {
+                out[0] = 0x0242;
+                return 1;
+            },
+            0x0243 => {
+                out[0] = 0x0180;
+                return 1;
+            },
+            0x0244 => {
+                out[0] = 0x0289;
+                return 1;
+            },
+            0x0245 => {
+                out[0] = 0x028C;
+                return 1;
+            },
+            else => {
+                out[0] = cp;
+                return 1;
+            },
         }
     }
 
@@ -226,27 +495,70 @@ pub fn foldCase(cp: u21, out: *[4]u21) usize {
         out[0] = cp;
         return 1;
     }
-    if (cp == 0x03CF) { out[0] = 0x03D7; return 1; }
-    if (cp == 0x03D0) { out[0] = 0x03B2; return 1; }
-    if (cp == 0x03D1) { out[0] = 0x03B8; return 1; }
-    if (cp == 0x03D5) { out[0] = 0x03C6; return 1; }
-    if (cp == 0x03D6) { out[0] = 0x03C0; return 1; }
-    if (cp == 0x03D7) { out[0] = cp; return 1; } // lowercase
+    if (cp == 0x03CF) {
+        out[0] = 0x03D7;
+        return 1;
+    }
+    if (cp == 0x03D0) {
+        out[0] = 0x03B2;
+        return 1;
+    }
+    if (cp == 0x03D1) {
+        out[0] = 0x03B8;
+        return 1;
+    }
+    if (cp == 0x03D5) {
+        out[0] = 0x03C6;
+        return 1;
+    }
+    if (cp == 0x03D6) {
+        out[0] = 0x03C0;
+        return 1;
+    }
+    if (cp == 0x03D7) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
     if (cp >= 0x03D8 and cp <= 0x03EF) {
-        if (cp % 2 == 0) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 0) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
     if (cp >= 0x03F0 and cp <= 0x03F4) {
         switch (cp) {
-            0x03F0 => { out[0] = 0x03BA; return 1; },
-            0x03F1 => { out[0] = 0x03C1; return 1; },
-            0x03F2 => { out[0] = 0x03F3; return 1; },
-            0x03F3 => { out[0] = cp; return 1; }, // lowercase
-            0x03F4 => { out[0] = 0x03B8; return 1; },
-            else => { out[0] = cp; return 1; },
+            0x03F0 => {
+                out[0] = 0x03BA;
+                return 1;
+            },
+            0x03F1 => {
+                out[0] = 0x03C1;
+                return 1;
+            },
+            0x03F2 => {
+                out[0] = 0x03F3;
+                return 1;
+            },
+            0x03F3 => {
+                out[0] = cp;
+                return 1;
+            }, // lowercase
+            0x03F4 => {
+                out[0] = 0x03B8;
+                return 1;
+            },
+            else => {
+                out[0] = cp;
+                return 1;
+            },
         }
     }
-    if (cp == 0x03F5) { out[0] = 0x03B5; return 1; }
+    if (cp == 0x03F5) {
+        out[0] = 0x03B5;
+        return 1;
+    }
 
     // Cyrillic (U+0410 - U+042F: uppercase, U+0430 - U+044F: lowercase)
     if (cp >= 0x0410 and cp <= 0x042F) {
@@ -262,22 +574,44 @@ pub fn foldCase(cp: u21, out: *[4]u21) usize {
         return 1;
     }
     if (cp >= 0x0460 and cp <= 0x0481) {
-        if (cp % 2 == 0) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 0) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
     if (cp >= 0x048A and cp <= 0x04BF) {
-        if (cp % 2 == 0) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 0) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
-    if (cp == 0x04C0) { out[0] = 0x04CF; return 1; }
+    if (cp == 0x04C0) {
+        out[0] = 0x04CF;
+        return 1;
+    }
     if (cp >= 0x04C1 and cp <= 0x04CE) {
-        if (cp % 2 == 1) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 1) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
-    if (cp == 0x04CF) { out[0] = cp; return 1; } // lowercase
+    if (cp == 0x04CF) {
+        out[0] = cp;
+        return 1;
+    } // lowercase
     if (cp >= 0x04D0 and cp <= 0x04FF) {
-        if (cp % 2 == 0) { out[0] = cp + 1; return 1; } // uppercase -> lowercase
-        out[0] = cp; return 1; // lowercase
+        if (cp % 2 == 0) {
+            out[0] = cp + 1;
+            return 1;
+        } // uppercase -> lowercase
+        out[0] = cp;
+        return 1; // lowercase
     }
 
     // Armenian (U+0531 - U+0556: uppercase, U+0561 - U+0586: lowercase)
@@ -338,8 +672,8 @@ pub fn unicodeEqlIgnoreCase(a: []const u8, b: []const u8) bool {
         const a_len = std.unicode.utf8ByteSequenceLength(a[a_i]) catch return false;
         const b_len = std.unicode.utf8ByteSequenceLength(b[b_i]) catch return false;
         if (a_i + a_len > a.len or b_i + b_len > b.len) return false;
-        const a_cp = std.unicode.utf8Decode(a[a_i..a_i + a_len]) catch return false;
-        const b_cp = std.unicode.utf8Decode(b[b_i..b_i + b_len]) catch return false;
+        const a_cp = std.unicode.utf8Decode(a[a_i .. a_i + a_len]) catch return false;
+        const b_cp = std.unicode.utf8Decode(b[b_i .. b_i + b_len]) catch return false;
         if (!caseInsensitiveEqual(a_cp, b_cp)) return false;
         a_i += a_len;
         b_i += b_len;

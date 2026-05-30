@@ -139,7 +139,7 @@ pub const Compiler = struct {
     pub fn compile(self: *Compiler, ast: *AstNode, options: RegexOptions) !Bytecode {
         self.options = options;
         try self.compileNode(ast);
-        
+
         // Append Match instruction as terminator
         try self.emitOp(.Match);
 
@@ -150,9 +150,8 @@ pub const Compiler = struct {
         // Peephole: merge consecutive Char instructions into String
         try self.mergeLiteralStrings();
 
-        // Peephole: eliminate Jmp chains and Split no-ops
+        // Peephole: eliminate Jmp chains
         self.eliminateJmpChains();
-        self.eliminateSplitNoops();
 
         try self.buildAssertEnds();
 
@@ -163,7 +162,7 @@ pub const Compiler = struct {
         self.bytecode = Bytecode.init(self.allocator);
         return bytecode;
     }
-    
+
     fn compileNode(self: *Compiler, node: *AstNode) !void {
         switch (node.type) {
             .Literal => {
@@ -216,29 +215,38 @@ pub const Compiler = struct {
                 //      ...left...
                 //      Jmp L4
                 // L2: ...right...
-                // L3: 
-                
+                // L3:
+
                 const split_idx = try self.bytecode.emit(.{ .Split = undefined });
-                
+
                 // Compile left branch
                 try self.compileNode(node.left.?);
                 const jmp_idx = try self.bytecode.emit(.{ .Jmp = undefined });
-                
+
                 // Right branch start position
                 const right_start = self.bytecode.getPC();
                 self.bytecode.patch(split_idx, right_start);
-                
+
                 // Compile right branch
                 try self.compileNode(node.right.?);
-                
+
                 // Jump target position
                 const end_pos = self.bytecode.getPC();
                 self.bytecode.patch(jmp_idx, end_pos);
             },
             .Star, .LazyStar, .Plus, .LazyPlus, .Question, .LazyQuestion => |tag| {
-                const min: usize = switch (tag) { .Plus, .LazyPlus => 1, else => 0 };
-                const max: ?usize = switch (tag) { .Question, .LazyQuestion => 1, else => null };
-                const lazy = switch (tag) { .LazyStar, .LazyPlus, .LazyQuestion => true, else => false };
+                const min: usize = switch (tag) {
+                    .Plus, .LazyPlus => 1,
+                    else => 0,
+                };
+                const max: ?usize = switch (tag) {
+                    .Question, .LazyQuestion => 1,
+                    else => null,
+                };
+                const lazy = switch (tag) {
+                    .LazyStar, .LazyPlus, .LazyQuestion => true,
+                    else => false,
+                };
                 try self.emitLoop(node.left.?, min, max, lazy);
             },
             .Group => {
@@ -274,8 +282,14 @@ pub const Compiler = struct {
             },
             .PossessiveStar, .PossessivePlus, .PossessiveQuestion => |tag| {
                 try self.emitOp(.AtomicStart);
-                const min: usize = switch (tag) { .PossessivePlus => 1, else => 0 };
-                const max: ?usize = switch (tag) { .PossessiveQuestion => 1, else => null };
+                const min: usize = switch (tag) {
+                    .PossessivePlus => 1,
+                    else => 0,
+                };
+                const max: ?usize = switch (tag) {
+                    .PossessiveQuestion => 1,
+                    else => null,
+                };
                 try self.emitLoop(node.left.?, min, max, false);
                 try self.emitOp(.AtomicEnd);
             },
@@ -561,10 +575,18 @@ pub const Compiler = struct {
         @memset(jump_targets, false);
         for (old) |inst| {
             switch (inst) {
-                .Split => |t| { if (t < old.len) jump_targets[t] = true; },
-                .Jmp => |t| { if (t < old.len) jump_targets[t] = true; },
-                .Conditional => |c| { if (c.target < old.len) jump_targets[c.target] = true; },
-                .SubroutineCall => |s| { if (s.target < old.len) jump_targets[s.target] = true; },
+                .Split => |t| {
+                    if (t < old.len) jump_targets[t] = true;
+                },
+                .Jmp => |t| {
+                    if (t < old.len) jump_targets[t] = true;
+                },
+                .Conditional => |c| {
+                    if (c.target < old.len) jump_targets[c.target] = true;
+                },
+                .SubroutineCall => |s| {
+                    if (s.target < old.len) jump_targets[s.target] = true;
+                },
                 else => {},
             }
         }
@@ -627,52 +649,50 @@ pub const Compiler = struct {
     }
 
     /// Peephole: eliminate Split that branches to the next instruction.
-    fn eliminateSplitNoops(self: *Compiler) void {
-        const insts = self.bytecode.instructions.items;
-        for (insts, 0..) |*inst, pc| {
-            if (inst.* == .Split) {
-                if (inst.Split == pc + 1) {
-                    inst.* = .{ .Jmp = pc + 1 };
-                }
-            }
-        }
-    }
-
     /// Peephole: eliminate Jmp chains (Jmp -> Jmp -> ... -> target).
     fn eliminateJmpChains(self: *Compiler) void {
         const insts = self.bytecode.instructions.items;
         if (insts.len == 0) return;
 
+        var visited: std.ArrayList(u32) = .empty;
+        defer visited.deinit(self.allocator);
+        visited.resize(self.allocator, insts.len) catch return;
+        @memset(visited.items, 0);
+
+        var generation: u32 = 1;
         // Resolve final target for each Jmp
         for (insts) |*inst| {
             if (inst.* == .Jmp) {
                 var target = inst.Jmp;
-                var visited = std.bit_set.IntegerBitSet(1024).initEmpty();
                 while (target < insts.len and insts[target] == .Jmp) {
-                    if (visited.isSet(target)) break; // cycle
-                    visited.set(target);
+                    if (visited.items[target] == generation) break; // cycle
+                    visited.items[target] = generation;
                     target = insts[target].Jmp;
                 }
                 inst.* = .{ .Jmp = target };
+                generation += 1;
+                if (generation == 0) {
+                    @memset(visited.items, 0);
+                    generation = 1;
+                }
             }
         }
     }
-
 };
 
 test "compiler literal" {
     const allocator = std.testing.allocator;
-    
+
     var parser = @import("parser.zig").Parser.init(allocator, "a");
     const ast = try parser.parse();
     defer {
         ast.?.deinit(allocator);
         allocator.destroy(ast.?);
     }
-    
+
     var compiler = Compiler.init(allocator);
     defer compiler.deinit();
-    
+
     var bytecode = try compiler.compile(ast.?, .{});
     defer bytecode.deinit();
     try std.testing.expectEqual(@as(usize, 2), bytecode.instructions.items.len);
@@ -683,17 +703,17 @@ test "compiler literal" {
 
 test "compiler star" {
     const allocator = std.testing.allocator;
-    
+
     var parser = @import("parser.zig").Parser.init(allocator, "a*");
     const ast = try parser.parse();
     defer {
         ast.?.deinit(allocator);
         allocator.destroy(ast.?);
     }
-    
+
     var compiler = Compiler.init(allocator);
     defer compiler.deinit();
-    
+
     var bytecode = try compiler.compile(ast.?, .{});
     defer bytecode.deinit();
     try std.testing.expectEqual(@as(usize, 4), bytecode.instructions.items.len);
