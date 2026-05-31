@@ -6,6 +6,8 @@ const Instruction = @import("bytecode.zig").Instruction;
 const OpCode = @import("bytecode.zig").OpCode;
 
 const RegexOptions = @import("options.zig").RegexOptions;
+const FlagsSnapshot = @import("options.zig").FlagsSnapshot;
+const snapshotFlags = @import("options.zig").snapshotFlags;
 const NodeType = @import("parser.zig").NodeType;
 
 /// Return the fixed byte width of a node, or null if variable width.
@@ -326,11 +328,11 @@ pub const Compiler = struct {
                     }
                 }
                 self.options = new_opts;
-                _ = try self.bytecode.emit(.{ .SetOption = new_opts });
+                _ = try self.bytecode.emit(.{ .SetOption = snapshotFlags(new_opts) });
                 if (f.inner) |inner| {
                     try self.compileNode(inner);
                     self.options = old_options;
-                    _ = try self.bytecode.emit(.{ .SetOption = old_options });
+                    _ = try self.bytecode.emit(.{ .SetOption = snapshotFlags(old_options) });
                 }
             },
             .AtomicGroup => |child| {
@@ -348,10 +350,19 @@ pub const Compiler = struct {
     fn buildAssertEnds(self: *Compiler) !void {
         try self.bytecode.assert_ends.resize(self.allocator, self.bytecode.instructions.items.len);
         @memset(self.bytecode.assert_ends.items, 0);
-        for (self.bytecode.instructions.items, 0..) |inst, pc| {
+        const insts = self.bytecode.instructions.items;
+        var stack: [64]usize = undefined;
+        var sp: usize = 0;
+        for (insts, 0..) |inst, pc| {
             switch (inst) {
                 .AssertForward, .AssertForwardNegative, .AssertBackward, .AssertBackwardNegative => {
-                    self.bytecode.assert_ends.items[pc] = findAssertEnd(self.bytecode.instructions.items, pc + 1);
+                    stack[sp] = pc;
+                    sp += 1;
+                },
+                .AssertForwardEnd, .AssertBackwardEnd => {
+                    sp -= 1;
+                    const start = stack[sp];
+                    self.bytecode.assert_ends.items[start] = pc;
                 },
                 else => {},
             }
@@ -362,7 +373,7 @@ pub const Compiler = struct {
         if (self.bytecode.instructions.items.len == 0) return;
         const first_inst = self.bytecode.instructions.items[0];
         if (first_inst != .String) return;
-        const prefix = first_inst.String;
+        const prefix = self.bytecode.strings.items[first_inst.String];
         if (prefix.len < 2) return;
         self.bytecode.prefix_len = prefix.len;
         self.bytecode.has_skip_table = true;
@@ -391,7 +402,7 @@ pub const Compiler = struct {
         if (first_inst == .Char) {
             self.bytecode.first_char = first_inst.Char;
         } else if (first_inst == .String) {
-            self.bytecode.first_char = first_inst.String[0];
+            self.bytecode.first_char = self.bytecode.strings.items[first_inst.String][0];
         } else if (first_inst == .CharUtf8) {
             const cp = first_inst.CharUtf8;
             if (cp < 0x80) {
@@ -592,8 +603,6 @@ pub const Compiler = struct {
 
         var i: usize = 0;
         while (i < old.len) {
-            remap[i] = new_insts.items.len;
-
             // Check for consecutive literal chars
             if (old[i] == .Char) {
                 var len: usize = 1;
@@ -614,15 +623,23 @@ pub const Compiler = struct {
                         buf[j] = old[i + j].Char;
                         remap[i + j] = new_insts.items.len;
                     }
+                    const idx: u32 = @intCast(self.bytecode.strings.items.len);
                     try self.bytecode.strings.append(self.allocator, buf);
-                    try new_insts.append(self.allocator, .{ .String = buf });
+                    try new_insts.append(self.allocator, .{ .String = idx });
                     i += len;
                     continue;
                 }
             }
 
-            try new_insts.append(self.allocator, old[i]);
+            // Batch-copy a run of non-mergeable instructions
+            const run_start = i;
+            remap[i] = new_insts.items.len;
             i += 1;
+            while (i < old.len and old[i] != .Char) {
+                remap[i] = new_insts.items.len + (i - run_start);
+                i += 1;
+            }
+            try new_insts.appendSlice(self.allocator, old[run_start..i]);
         }
 
         // Remap jump targets

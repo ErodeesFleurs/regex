@@ -334,67 +334,51 @@ pub const CharClass = struct {
 
 /// Check if a character belongs to a POSIX character class.
 /// Supports: alpha, alnum, ascii, blank, cntrl, digit, graph, lower, print, punct, space, upper, word, xdigit
+const PosixClass = enum {
+    alpha,
+    alnum,
+    ascii,
+    blank,
+    cntrl,
+    digit,
+    graph,
+    lower,
+    print,
+    punct,
+    space,
+    upper,
+    word,
+    xdigit,
+};
+
+const posix_class_map = std.StaticStringMap(PosixClass).initComptime(&.{
+    .{ "alpha", .alpha }, .{ "alnum", .alnum },   .{ "ascii", .ascii }, .{ "blank", .blank },
+    .{ "cntrl", .cntrl }, .{ "digit", .digit },   .{ "graph", .graph }, .{ "lower", .lower },
+    .{ "print", .print }, .{ "punct", .punct },   .{ "space", .space }, .{ "upper", .upper },
+    .{ "word", .word },   .{ "xdigit", .xdigit },
+});
+
 fn isPosixClass(ch: u8, name: []const u8) bool {
     const negated = name.len > 0 and name[0] == '^';
     const class_name = if (negated) name[1..] else name;
-    const result = if (class_name.len == 0) false else switch (class_name[0]) {
-        'a' => switch (class_name[1]) {
-            'l' => if (class_name.len == 5 and class_name[2] == 'p' and class_name[3] == 'h' and class_name[4] == 'a')
-                std.ascii.isAlphabetic(ch)
-            else if (class_name.len == 5 and class_name[2] == 'n' and class_name[3] == 'u' and class_name[4] == 'm')
-                std.ascii.isAlphanumeric(ch)
-            else if (class_name.len == 5 and class_name[2] == 's' and class_name[3] == 'c' and class_name[4] == 'i')
-                ch < 128
-            else
-                false,
-            else => false,
-        },
-        'b' => if (class_name.len == 5 and class_name[1] == 'l' and class_name[2] == 'a' and class_name[3] == 'n' and class_name[4] == 'k')
-            ch == ' ' or ch == '\t'
-        else
-            false,
-        'c' => if (class_name.len == 5 and class_name[1] == 'n' and class_name[2] == 't' and class_name[3] == 'r' and class_name[4] == 'l')
-            ch < 0x20 or ch == 0x7F
-        else
-            false,
-        'd' => if (class_name.len == 5 and class_name[1] == 'i' and class_name[2] == 'g' and class_name[3] == 'i' and class_name[4] == 't')
-            std.ascii.isDigit(ch)
-        else
-            false,
-        'g' => if (class_name.len == 5 and class_name[1] == 'r' and class_name[2] == 'a' and class_name[3] == 'p' and class_name[4] == 'h')
-            ch >= 0x21 and ch <= 0x7E
-        else
-            false,
-        'l' => if (class_name.len == 5 and class_name[1] == 'o' and class_name[2] == 'w' and class_name[3] == 'e' and class_name[4] == 'r')
-            std.ascii.isLower(ch)
-        else
-            false,
-        'p' => if (class_name.len == 5 and class_name[1] == 'r' and class_name[2] == 'i' and class_name[3] == 'n' and class_name[4] == 't')
-            ch >= 0x20 and ch <= 0x7E
-        else if (class_name.len == 5 and class_name[1] == 'u' and class_name[2] == 'n' and class_name[3] == 'c' and class_name[4] == 't')
-            std.ascii.isPunctuation(ch)
-        else
-            false,
-        's' => if (class_name.len == 5 and class_name[1] == 'p' and class_name[2] == 'a' and class_name[3] == 'c' and class_name[4] == 'e')
-            ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r' or ch == '\x0C' or ch == '\x0B'
-        else
-            false,
-        'u' => if (class_name.len == 5 and class_name[1] == 'p' and class_name[2] == 'p' and class_name[3] == 'e' and class_name[4] == 'r')
-            std.ascii.isUpper(ch)
-        else
-            false,
-        'w' => if (class_name.len == 4 and class_name[1] == 'o' and class_name[2] == 'r' and class_name[3] == 'd')
-            std.ascii.isAlphanumeric(ch) or ch == '_'
-        else
-            false,
-        'x' => if (class_name.len == 6 and class_name[1] == 'd' and class_name[2] == 'i' and class_name[3] == 'g' and class_name[4] == 'i' and class_name[5] == 't')
-            std.ascii.isHex(ch)
-        else
-            false,
-        else => false,
+    const class = posix_class_map.get(class_name) orelse return false;
+    const result = switch (class) {
+        .alpha => std.ascii.isAlphabetic(ch),
+        .alnum => std.ascii.isAlphanumeric(ch),
+        .ascii => ch < 128,
+        .blank => ch == ' ' or ch == '\t',
+        .cntrl => ch < 0x20 or ch == 0x7F,
+        .digit => std.ascii.isDigit(ch),
+        .graph => ch >= 0x21 and ch <= 0x7E,
+        .lower => std.ascii.isLower(ch),
+        .print => ch >= 0x20 and ch <= 0x7E,
+        .punct => std.ascii.isPunctuation(ch),
+        .space => ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r' or ch == '\x0C' or ch == '\x0B',
+        .upper => std.ascii.isUpper(ch),
+        .word => std.ascii.isAlphanumeric(ch) or ch == '_',
+        .xdigit => std.ascii.isHex(ch),
     };
-    if (negated) return !result;
-    return result;
+    return if (negated) !result else result;
 }
 
 pub const ParseErrorInfo = struct {

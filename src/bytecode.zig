@@ -1,6 +1,6 @@
 const std = @import("std");
 const CharClass = @import("parser.zig").CharClass;
-const RegexOptions = @import("options.zig").RegexOptions;
+const FlagsSnapshot = @import("options.zig").FlagsSnapshot;
 
 pub const OpCode = enum(u8) {
     // Basic instructions
@@ -76,7 +76,7 @@ pub const OpCode = enum(u8) {
 
 pub const Instruction = union(OpCode) {
     Char: u8,
-    String: []const u8,
+    String: u32,
     Any: void,
     CharClass: *CharClass,
     Split: usize,
@@ -98,7 +98,7 @@ pub const Instruction = union(OpCode) {
     Backref: usize,
     WordBoundary: void,
     NotWordBoundary: void,
-    SetOption: RegexOptions,
+    SetOption: FlagsSnapshot,
     AtomicStart: void,
     AtomicEnd: void,
     UnicodeProperty: struct { property: []const u8, negated: bool },
@@ -115,7 +115,7 @@ pub const Instruction = union(OpCode) {
     pub fn format(self: Instruction, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .Char => |ch| try writer.print("Char({c})", .{ch}),
-            .String => |s| try writer.print("String({s})", .{s}),
+            .String => |idx| try writer.print("String({})", .{idx}),
             .Any => try writer.print("Any", .{}),
             .CharClass => try writer.print("CharClass", .{}),
             .Split => |target| try writer.print("Split -> {}", .{target}),

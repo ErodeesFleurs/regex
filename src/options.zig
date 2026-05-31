@@ -21,3 +21,27 @@ pub const RegexOptions = struct {
         });
     }
 };
+
+/// Compressed snapshot of mutable regex flags (max_steps never changes at runtime).
+pub const FlagsSnapshot = packed struct {
+    case_sensitive: bool = true,
+    multiline: bool = false,
+    dot_matches_newline: bool = false,
+    free_spacing: bool = false,
+};
+
+pub fn snapshotFlags(opts: RegexOptions) FlagsSnapshot {
+    return .{
+        .case_sensitive = opts.case_sensitive,
+        .multiline = opts.multiline,
+        .dot_matches_newline = opts.dot_matches_newline,
+        .free_spacing = opts.free_spacing,
+    };
+}
+
+pub fn applyFlagsSnapshot(fs: FlagsSnapshot, opts: *RegexOptions) void {
+    opts.case_sensitive = fs.case_sensitive;
+    opts.multiline = fs.multiline;
+    opts.dot_matches_newline = fs.dot_matches_newline;
+    opts.free_spacing = fs.free_spacing;
+}

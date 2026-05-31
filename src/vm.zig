@@ -3,6 +3,9 @@ const Bytecode = @import("bytecode.zig").Bytecode;
 const Instruction = @import("bytecode.zig").Instruction;
 
 const RegexOptions = @import("options.zig").RegexOptions;
+const FlagsSnapshot = @import("options.zig").FlagsSnapshot;
+const snapshotFlags = @import("options.zig").snapshotFlags;
+const applyFlagsSnapshot = @import("options.zig").applyFlagsSnapshot;
 const unicode_case = @import("unicode_case.zig");
 
 /// Comptime enum of all known Unicode property names.
@@ -143,47 +146,24 @@ pub const MatchResult = struct {
 };
 
 const SENTINEL = std.math.maxInt(usize);
+const CAP_SENTINEL = std.math.maxInt(u32);
 
-/// Compressed snapshot of mutable regex flags (max_steps never changes at runtime).
-const FlagsSnapshot = packed struct {
-    case_sensitive: bool = true,
-    multiline: bool = false,
-    dot_matches_newline: bool = false,
-    free_spacing: bool = false,
-};
-
-fn snapshotFlags(opts: RegexOptions) FlagsSnapshot {
-    return .{
-        .case_sensitive = opts.case_sensitive,
-        .multiline = opts.multiline,
-        .dot_matches_newline = opts.dot_matches_newline,
-        .free_spacing = opts.free_spacing,
-    };
-}
-
-fn applyFlagsSnapshot(fs: FlagsSnapshot, opts: *RegexOptions) void {
-    opts.case_sensitive = fs.case_sensitive;
-    opts.multiline = fs.multiline;
-    opts.dot_matches_newline = fs.dot_matches_newline;
-    opts.free_spacing = fs.free_spacing;
-}
-
-// Stack frame used for backtracking (~72 bytes on 64-bit, down from ~112)
+// Stack frame used for backtracking (~56 bytes on 64-bit, down from ~72)
 const Frame = struct {
     pc: usize,
     pos: usize,
-    capture_slot: usize,
     capture_old_value: usize,
-    paired_capture_slot: usize,
     paired_capture_old_value: usize,
-    subroutine_stack_len: usize,
+    subroutine_stack_len: u32,
+    capture_slot: u32,
+    paired_capture_slot: u32,
     options: FlagsSnapshot,
 };
 
 /// Restore state from a backtrack frame, handling both main and sub-match modes.
 fn backtrack(
     frame: Frame,
-    captures: *std.ArrayList(?usize),
+    captures: []?usize,
     pc: *usize,
     pos: *usize,
     subroutine_stack: *std.ArrayList(usize),
@@ -192,34 +172,37 @@ fn backtrack(
     subroutine_stack.shrinkRetainingCapacity(frame.subroutine_stack_len);
     pc.* = frame.pc;
     pos.* = frame.pos;
-    if (frame.capture_slot != SENTINEL) {
-        captures.items[frame.capture_slot] = if (frame.capture_old_value == SENTINEL) null else frame.capture_old_value;
+    if (frame.capture_slot != CAP_SENTINEL) {
+        captures[frame.capture_slot] = if (frame.capture_old_value == SENTINEL) null else frame.capture_old_value;
     }
-    if (frame.paired_capture_slot != SENTINEL) {
-        captures.items[frame.paired_capture_slot] = if (frame.paired_capture_old_value == SENTINEL) null else frame.paired_capture_old_value;
+    if (frame.paired_capture_slot != CAP_SENTINEL) {
+        captures[frame.paired_capture_slot] = if (frame.paired_capture_old_value == SENTINEL) null else frame.paired_capture_old_value;
     }
     applyFlagsSnapshot(frame.options, options);
 }
 
 /// Pop frame and backtrack if stack is non-empty. Returns false if stack was empty.
-fn maybeBacktrack(
+inline fn maybeBacktrack(
     stack: *std.ArrayList(Frame),
-    captures: *std.ArrayList(?usize),
+    captures: []?usize,
     pc: *usize,
     pos: *usize,
     subroutine_stack: *std.ArrayList(usize),
     options: *RegexOptions,
 ) bool {
-    if (stack.items.len == 0) return false;
+    if (stack.items.len == 0) {
+        @branchHint(.unlikely);
+        return false;
+    }
     backtrack(stack.pop().?, captures, pc, pos, subroutine_stack, options);
     return true;
 }
 
 /// If `advance` is non-null, advance pc/pos and return true.
 /// Otherwise backtrack and return whether backtracking succeeded.
-fn tryMatchOpt(
+inline fn tryMatchOpt(
     stack: *std.ArrayList(Frame),
-    captures: *std.ArrayList(?usize),
+    captures: []?usize,
     pc: *usize,
     pos: *usize,
     subroutine_stack: *std.ArrayList(usize),
@@ -230,15 +213,17 @@ fn tryMatchOpt(
         pc.* += 1;
         pos.* += len;
         return true;
+    } else {
+        @branchHint(.unlikely);
+        return maybeBacktrack(stack, captures, pc, pos, subroutine_stack, options);
     }
-    return maybeBacktrack(stack, captures, pc, pos, subroutine_stack, options);
 }
 
 /// If `matched` is true, advance pc/pos by `advance_by` and return true.
 /// Otherwise backtrack and return whether backtracking succeeded.
-fn tryMatch(
+inline fn tryMatch(
     stack: *std.ArrayList(Frame),
-    captures: *std.ArrayList(?usize),
+    captures: []?usize,
     pc: *usize,
     pos: *usize,
     subroutine_stack: *std.ArrayList(usize),
@@ -250,8 +235,10 @@ fn tryMatch(
         pc.* += 1;
         pos.* += advance_by;
         return true;
+    } else {
+        @branchHint(.unlikely);
+        return maybeBacktrack(stack, captures, pc, pos, subroutine_stack, options);
     }
-    return maybeBacktrack(stack, captures, pc, pos, subroutine_stack, options);
 }
 
 /// Match a CharClass instruction at the given position.
@@ -259,37 +246,43 @@ fn tryMatch(
 fn matchCharClass(cc: *const @import("parser.zig").CharClass, input: []const u8, pos: usize, case_sensitive: bool) ?usize {
     if (pos >= input.len) return null;
     const ch = input[pos];
+    const is_ascii = ch < 128;
+
+    // Cache flags locally to avoid repeated field access
+    const negated = cc.negated;
+    const has_bitmap = cc.has_ascii_bitmap;
+    const has_ranges_or_posix = cc.has_ranges_or_posix;
+    const has_unicode_ranges = cc.has_unicode_ranges;
+    const has_unicode_props = cc.has_unicode_props;
 
     // Fast path for ASCII: check dense bitmap first (O(1)).
     // Only use bitmap for non-negated classes with no POSIX/Unicode classes,
     // because bitmap tracks ranges only.
-    if (ch < 128 and case_sensitive and cc.has_ascii_bitmap and !cc.negated and !cc.has_posix_classes and !cc.has_unicode_ranges and !cc.has_unicode_props) {
-        const byte = ch;
-        const byte_mask = @as(u1, @truncate(cc.ascii_bitmap[byte >> 3] >> @truncate(byte & 7)));
+    if (is_ascii and case_sensitive and has_bitmap and !negated and !cc.has_posix_classes and !has_unicode_ranges and !has_unicode_props) {
+        const byte_mask = @as(u1, @truncate(cc.ascii_bitmap[ch >> 3] >> @truncate(ch & 7)));
         if (byte_mask != 0) return 1;
         return null;
     }
 
     // Check ranges and POSIX classes (ASCII single-byte)
-    if (ch < 128 and cc.has_ranges_or_posix) {
-        const range_match = if (case_sensitive)
-            cc.contains(ch)
-        else
-            cc.contains(ch) or cc.contains(std.ascii.toLower(ch)) or cc.contains(std.ascii.toUpper(ch));
-        if (range_match) return 1;
-        const posix_match = if (case_sensitive)
-            cc.containsPosixClass(ch)
-        else
-            cc.containsPosixClass(ch) or cc.containsPosixClass(std.ascii.toLower(ch)) or cc.containsPosixClass(std.ascii.toUpper(ch));
-        if (posix_match) return 1;
+    if (is_ascii and has_ranges_or_posix) {
+        if (case_sensitive) {
+            if (cc.contains(ch)) return 1;
+            if (cc.containsPosixClass(ch)) return 1;
+        } else {
+            const ch_lower = std.ascii.toLower(ch);
+            const ch_upper = std.ascii.toUpper(ch);
+            if (cc.contains(ch) or cc.contains(ch_lower) or cc.contains(ch_upper)) return 1;
+            if (cc.containsPosixClass(ch) or cc.containsPosixClass(ch_lower) or cc.containsPosixClass(ch_upper)) return 1;
+        }
     }
 
     // For ASCII chars with no Unicode data, we're done
-    if (ch < 128 and !cc.has_unicode_ranges and !cc.has_unicode_props) return null;
+    if (is_ascii and !has_unicode_ranges and !has_unicode_props) return null;
 
     // Check Unicode ranges
-    if (cc.has_unicode_ranges) {
-        if (ch < 128) {
+    if (has_unicode_ranges) {
+        if (is_ascii) {
             if (cc.containsUnicodeRange(ch)) return 1;
         } else {
             const byte_len = std.unicode.utf8ByteSequenceLength(ch) catch 1;
@@ -301,7 +294,7 @@ fn matchCharClass(cc: *const @import("parser.zig").CharClass, input: []const u8,
     }
 
     // Check Unicode properties
-    if (cc.has_unicode_props) {
+    if (has_unicode_props) {
         if (matchUnicodePropertyInClass(input, pos, cc)) |byte_len| {
             return byte_len;
         }
@@ -372,7 +365,55 @@ inline fn checkAssertEnd(pos: usize, input: []const u8, multiline: bool) bool {
     return if (multiline) (pos == input.len or input[pos] == '\n') else (pos == input.len);
 }
 
-inline fn inUnicodeRanges(cp: u21, ranges: []const [2]u21) bool {
+/// SIMD-accelerated case-insensitive ASCII string comparison.
+/// Falls back to scalar for non-ASCII bytes.
+fn asciiEqlIgnoreCaseSimd(a: []const u8, b: []const u8) bool {
+    std.debug.assert(a.len == b.len);
+    const vec_len = 16;
+    const len = a.len;
+    var i: usize = 0;
+
+    while (i + vec_len <= len) : (i += vec_len) {
+        const va: @Vector(vec_len, u8) = a[i..][0..vec_len].*;
+        const vb: @Vector(vec_len, u8) = b[i..][0..vec_len].*;
+        const non_ascii_a = @reduce(.Or, va >= @as(@Vector(vec_len, u8), @splat(128)));
+        const non_ascii_b = @reduce(.Or, vb >= @as(@Vector(vec_len, u8), @splat(128)));
+        if (non_ascii_a or non_ascii_b) {
+            for (0..vec_len) |j| {
+                const p = a[i + j];
+                const s = b[i + j];
+                if (p >= 128 or s >= 128) {
+                    if (p != s) return false;
+                } else if ((p | 0x20) != (s | 0x20)) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        const mask = (va | @as(@Vector(vec_len, u8), @splat(0x20))) == (vb | @as(@Vector(vec_len, u8), @splat(0x20)));
+        if (!@reduce(.And, mask)) return false;
+    }
+
+    while (i < len) : (i += 1) {
+        const p = a[i];
+        const s = b[i];
+        if (p >= 128 or s >= 128) {
+            if (p != s) return false;
+        } else if ((p | 0x20) != (s | 0x20)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline fn inUnicodeRanges(cp: u21, comptime ranges: anytype) bool {
+    // For tiny tables, unrolled linear search is faster than binary search
+    if (ranges.len <= 4) {
+        inline for (ranges) |range| {
+            if (cp >= range[0] and cp <= range[1]) return true;
+        }
+        return false;
+    }
     var left: usize = 0;
     var right: usize = ranges.len;
     while (left < right) {
@@ -1866,41 +1907,41 @@ const _Pe_ranges = [_][2]u21{
 fn isUnicodeProperty(cp: u21, prop: UnicodeProp) bool {
     switch (prop) {
         .L => return if (cp < 128) std.ascii.isAlphabetic(@intCast(cp)) else isUnicodeProperty(cp, .Lu) or isUnicodeProperty(cp, .Ll) or isUnicodeProperty(cp, .Lt) or isUnicodeProperty(cp, .Lm) or isUnicodeProperty(cp, .Lo),
-        .Lu => return if (cp < 128) std.ascii.isUpper(@intCast(cp)) else inUnicodeRanges(cp, &_Lu_ranges) or (cp >= 0x0100 and cp <= 0x0136 and cp % 2 == 0) or (cp >= 0x0139 and cp <= 0x0147 and cp % 2 == 1) or (cp >= 0x014A and cp <= 0x0176 and cp % 2 == 0),
-        .Ll => return if (cp < 128) std.ascii.isLower(@intCast(cp)) else inUnicodeRanges(cp, &_Ll_ranges) or (cp >= 0x0101 and cp <= 0x0137 and cp % 2 == 1) or (cp >= 0x013A and cp <= 0x0148 and cp % 2 == 0) or (cp >= 0x014B and cp <= 0x0177 and cp % 2 == 1) or (cp >= 0x017A and cp <= 0x017E and cp % 2 == 0),
-        .Lt => return if (cp < 128) false else inUnicodeRanges(cp, &_Lt_ranges),
-        .Lm => return if (cp < 128) false else inUnicodeRanges(cp, &_Lm_ranges),
-        .Lo => return if (cp < 128) false else inUnicodeRanges(cp, &_Lo_ranges),
+        .Lu => return if (cp < 128) std.ascii.isUpper(@intCast(cp)) else inUnicodeRanges(cp, _Lu_ranges) or (cp >= 0x0100 and cp <= 0x0136 and cp % 2 == 0) or (cp >= 0x0139 and cp <= 0x0147 and cp % 2 == 1) or (cp >= 0x014A and cp <= 0x0176 and cp % 2 == 0),
+        .Ll => return if (cp < 128) std.ascii.isLower(@intCast(cp)) else inUnicodeRanges(cp, _Ll_ranges) or (cp >= 0x0101 and cp <= 0x0137 and cp % 2 == 1) or (cp >= 0x013A and cp <= 0x0148 and cp % 2 == 0) or (cp >= 0x014B and cp <= 0x0177 and cp % 2 == 1) or (cp >= 0x017A and cp <= 0x017E and cp % 2 == 0),
+        .Lt => return if (cp < 128) false else inUnicodeRanges(cp, _Lt_ranges),
+        .Lm => return if (cp < 128) false else inUnicodeRanges(cp, _Lm_ranges),
+        .Lo => return if (cp < 128) false else inUnicodeRanges(cp, _Lo_ranges),
         .N => return if (cp < 128) std.ascii.isDigit(@intCast(cp)) else isUnicodeProperty(cp, .Nd) or isUnicodeProperty(cp, .Nl) or isUnicodeProperty(cp, .No),
-        .Nd => return if (cp < 128) std.ascii.isDigit(@intCast(cp)) else inUnicodeRanges(cp, &_Nd_ranges),
-        .Nl => return if (cp < 128) false else inUnicodeRanges(cp, &_Nl_ranges),
-        .No => return if (cp < 128) false else inUnicodeRanges(cp, &_No_ranges),
+        .Nd => return if (cp < 128) std.ascii.isDigit(@intCast(cp)) else inUnicodeRanges(cp, _Nd_ranges),
+        .Nl => return if (cp < 128) false else inUnicodeRanges(cp, _Nl_ranges),
+        .No => return if (cp < 128) false else inUnicodeRanges(cp, _No_ranges),
         .P => return if (cp < 128) std.ascii.isPunctuation(@intCast(cp)) else isUnicodeProperty(cp, .Pc) or isUnicodeProperty(cp, .Pd) or isUnicodeProperty(cp, .Ps) or isUnicodeProperty(cp, .Pe) or isUnicodeProperty(cp, .Pi) or isUnicodeProperty(cp, .Pf) or isUnicodeProperty(cp, .Po),
-        .Pc => return if (cp < 128) @as(u8, @intCast(cp)) == '_' else inUnicodeRanges(cp, &_Pc_ranges),
-        .Pd => return if (cp < 128) @as(u8, @intCast(cp)) == '-' else inUnicodeRanges(cp, &_Pd_ranges),
-        .Ps => return if (cp < 128) @as(u8, @intCast(cp)) == '(' or @as(u8, @intCast(cp)) == '[' or @as(u8, @intCast(cp)) == '{' else inUnicodeRanges(cp, &_Ps_ranges),
-        .Pe => return if (cp < 128) @as(u8, @intCast(cp)) == ')' or @as(u8, @intCast(cp)) == ']' or @as(u8, @intCast(cp)) == '}' else inUnicodeRanges(cp, &_Pe_ranges),
-        .Pi => return if (cp < 128) @as(u8, @intCast(cp)) == 0xAB else inUnicodeRanges(cp, &_Pi_ranges),
-        .Pf => return if (cp < 128) @as(u8, @intCast(cp)) == 0xBB else inUnicodeRanges(cp, &_Pf_ranges),
-        .Po => return if (cp < 128) std.ascii.isPunctuation(@intCast(cp)) and @as(u8, @intCast(cp)) != '_' and @as(u8, @intCast(cp)) != '-' and @as(u8, @intCast(cp)) != '(' and @as(u8, @intCast(cp)) != '[' and @as(u8, @intCast(cp)) != '{' and @as(u8, @intCast(cp)) != ')' and @as(u8, @intCast(cp)) != ']' and @as(u8, @intCast(cp)) != '}' else inUnicodeRanges(cp, &_Po_ranges),
+        .Pc => return if (cp < 128) @as(u8, @intCast(cp)) == '_' else inUnicodeRanges(cp, _Pc_ranges),
+        .Pd => return if (cp < 128) @as(u8, @intCast(cp)) == '-' else inUnicodeRanges(cp, _Pd_ranges),
+        .Ps => return if (cp < 128) @as(u8, @intCast(cp)) == '(' or @as(u8, @intCast(cp)) == '[' or @as(u8, @intCast(cp)) == '{' else inUnicodeRanges(cp, _Ps_ranges),
+        .Pe => return if (cp < 128) @as(u8, @intCast(cp)) == ')' or @as(u8, @intCast(cp)) == ']' or @as(u8, @intCast(cp)) == '}' else inUnicodeRanges(cp, _Pe_ranges),
+        .Pi => return if (cp < 128) @as(u8, @intCast(cp)) == 0xAB else inUnicodeRanges(cp, _Pi_ranges),
+        .Pf => return if (cp < 128) @as(u8, @intCast(cp)) == 0xBB else inUnicodeRanges(cp, _Pf_ranges),
+        .Po => return if (cp < 128) std.ascii.isPunctuation(@intCast(cp)) and @as(u8, @intCast(cp)) != '_' and @as(u8, @intCast(cp)) != '-' and @as(u8, @intCast(cp)) != '(' and @as(u8, @intCast(cp)) != '[' and @as(u8, @intCast(cp)) != '{' and @as(u8, @intCast(cp)) != ')' and @as(u8, @intCast(cp)) != ']' and @as(u8, @intCast(cp)) != '}' else inUnicodeRanges(cp, _Po_ranges),
         .S => return if (cp < 128) @as(u8, @intCast(cp)) == '$' or @as(u8, @intCast(cp)) == '+' or @as(u8, @intCast(cp)) == '<' or @as(u8, @intCast(cp)) == '=' or @as(u8, @intCast(cp)) == '>' or @as(u8, @intCast(cp)) == '^' or @as(u8, @intCast(cp)) == '|' or @as(u8, @intCast(cp)) == '~' else isUnicodeProperty(cp, .Sc) or isUnicodeProperty(cp, .Sk) or isUnicodeProperty(cp, .Sm) or isUnicodeProperty(cp, .So),
-        .Sc => return if (cp < 128) @as(u8, @intCast(cp)) == '$' else inUnicodeRanges(cp, &_Sc_ranges),
-        .Sk => return if (cp < 128) @as(u8, @intCast(cp)) == '^' or @as(u8, @intCast(cp)) == '`' else inUnicodeRanges(cp, &_Sk_ranges),
-        .Sm => return if (cp < 128) @as(u8, @intCast(cp)) == '+' or @as(u8, @intCast(cp)) == '<' or @as(u8, @intCast(cp)) == '=' or @as(u8, @intCast(cp)) == '>' or @as(u8, @intCast(cp)) == '|' or @as(u8, @intCast(cp)) == '~' else inUnicodeRanges(cp, &_Sm_ranges),
-        .So => return if (cp < 128) false else inUnicodeRanges(cp, &_So_ranges),
+        .Sc => return if (cp < 128) @as(u8, @intCast(cp)) == '$' else inUnicodeRanges(cp, _Sc_ranges),
+        .Sk => return if (cp < 128) @as(u8, @intCast(cp)) == '^' or @as(u8, @intCast(cp)) == '`' else inUnicodeRanges(cp, _Sk_ranges),
+        .Sm => return if (cp < 128) @as(u8, @intCast(cp)) == '+' or @as(u8, @intCast(cp)) == '<' or @as(u8, @intCast(cp)) == '=' or @as(u8, @intCast(cp)) == '>' or @as(u8, @intCast(cp)) == '|' or @as(u8, @intCast(cp)) == '~' else inUnicodeRanges(cp, _Sm_ranges),
+        .So => return if (cp < 128) false else inUnicodeRanges(cp, _So_ranges),
         .Z => return if (cp < 128) std.ascii.isWhitespace(@intCast(cp)) else isUnicodeProperty(cp, .Zs) or isUnicodeProperty(cp, .Zl) or isUnicodeProperty(cp, .Zp),
-        .Zs => return if (cp < 128) @as(u8, @intCast(cp)) == ' ' or @as(u8, @intCast(cp)) == '\t' or @as(u8, @intCast(cp)) == '\n' or @as(u8, @intCast(cp)) == '\r' else inUnicodeRanges(cp, &_Zs_ranges),
-        .Zl => return if (cp < 128) false else inUnicodeRanges(cp, &_Zl_ranges),
-        .Zp => return if (cp < 128) false else inUnicodeRanges(cp, &_Zp_ranges),
+        .Zs => return if (cp < 128) @as(u8, @intCast(cp)) == ' ' or @as(u8, @intCast(cp)) == '\t' or @as(u8, @intCast(cp)) == '\n' or @as(u8, @intCast(cp)) == '\r' else inUnicodeRanges(cp, _Zs_ranges),
+        .Zl => return if (cp < 128) false else inUnicodeRanges(cp, _Zl_ranges),
+        .Zp => return if (cp < 128) false else inUnicodeRanges(cp, _Zp_ranges),
         .C => return if (cp < 128) @as(u8, @intCast(cp)) < 0x20 or @as(u8, @intCast(cp)) == 0x7F else isUnicodeProperty(cp, .Cc) or isUnicodeProperty(cp, .Cf) or isUnicodeProperty(cp, .Co) or isUnicodeProperty(cp, .Cs),
-        .Cc => return if (cp < 128) @as(u8, @intCast(cp)) < 0x20 or @as(u8, @intCast(cp)) == 0x7F else inUnicodeRanges(cp, &_Cc_ranges),
-        .Cf => return if (cp < 128) false else inUnicodeRanges(cp, &_Cf_ranges),
-        .Co => return if (cp < 128) false else inUnicodeRanges(cp, &_Co_ranges),
-        .Cs => return if (cp < 128) false else inUnicodeRanges(cp, &_Cs_ranges),
+        .Cc => return if (cp < 128) @as(u8, @intCast(cp)) < 0x20 or @as(u8, @intCast(cp)) == 0x7F else inUnicodeRanges(cp, _Cc_ranges),
+        .Cf => return if (cp < 128) false else inUnicodeRanges(cp, _Cf_ranges),
+        .Co => return if (cp < 128) false else inUnicodeRanges(cp, _Co_ranges),
+        .Cs => return if (cp < 128) false else inUnicodeRanges(cp, _Cs_ranges),
         .M => return if (cp < 128) false else isUnicodeProperty(cp, .Mn) or isUnicodeProperty(cp, .Mc) or isUnicodeProperty(cp, .Me),
-        .Mn => return if (cp < 128) false else inUnicodeRanges(cp, &_Mn_ranges),
-        .Mc => return if (cp < 128) false else inUnicodeRanges(cp, &_Mc_ranges),
-        .Me => return if (cp < 128) false else inUnicodeRanges(cp, &_Me_ranges),
+        .Mn => return if (cp < 128) false else inUnicodeRanges(cp, _Mn_ranges),
+        .Mc => return if (cp < 128) false else inUnicodeRanges(cp, _Mc_ranges),
+        .Me => return if (cp < 128) false else inUnicodeRanges(cp, _Me_ranges),
         // Scripts
         .Han => return (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0x3400 and cp <= 0x4DBF) or (cp >= 0xF900 and cp <= 0xFAFF),
         .Latin => return (cp >= 0x0041 and cp <= 0x007A) or (cp >= 0x00C0 and cp <= 0x00FF) or (cp >= 0x0100 and cp <= 0x017F) or (cp >= 0x0180 and cp <= 0x024F),
@@ -2058,14 +2099,20 @@ fn matchGraphemeCluster(input: []const u8, pos: usize) ?usize {
     return total_len;
 }
 
+/// Combined state for loop prevention on Split instructions.
+/// Stores both position and generation in one cache line.
+const SplitState = struct {
+    pos: usize,
+    gen: u32,
+};
+
 pub const Vm = struct {
     bytecode: Bytecode,
     allocator: std.mem.Allocator,
     options: RegexOptions,
     atomic_stack: std.ArrayList(usize) = .empty,
     last_match_end: usize = 0,
-    last_pos: std.ArrayList(usize) = .empty,
-    last_pos_gen: std.ArrayList(u32) = .empty,
+    split_states: std.ArrayList(SplitState) = .empty,
     match_generation: u32 = 0,
     // Reusable per-match buffer for captures (size is fixed after compile)
     captures_buf: std.ArrayList(?usize) = .empty,
@@ -2080,16 +2127,14 @@ pub const Vm = struct {
             .options = options,
             .atomic_stack = .empty,
             .last_match_end = 0,
-            .last_pos = .empty,
-            .last_pos_gen = .empty,
+            .split_states = .empty,
             .match_generation = 0,
             .captures_buf = .empty,
         };
         errdefer vm.deinit();
         // Pre-allocate fixed-size buffers based on bytecode size
         try vm.captures_buf.resize(allocator, (bytecode.num_groups + 1) * 2);
-        try vm.last_pos.resize(allocator, bytecode.instructions.items.len);
-        try vm.last_pos_gen.resize(allocator, bytecode.instructions.items.len);
+        try vm.split_states.resize(allocator, bytecode.instructions.items.len);
         try vm.atomic_stack.ensureTotalCapacity(allocator, 64);
         try vm.stack_buf.ensureTotalCapacity(allocator, 64);
         try vm.subroutine_stack_buf.ensureTotalCapacity(allocator, 32);
@@ -2098,8 +2143,7 @@ pub const Vm = struct {
 
     pub fn deinit(self: *Vm) void {
         self.atomic_stack.deinit(self.allocator);
-        self.last_pos.deinit(self.allocator);
-        self.last_pos_gen.deinit(self.allocator);
+        self.split_states.deinit(self.allocator);
         self.captures_buf.deinit(self.allocator);
         self.stack_buf.deinit(self.allocator);
         self.subroutine_stack_buf.deinit(self.allocator);
@@ -2161,18 +2205,26 @@ pub const Vm = struct {
         var step_counter: usize = 0;
 
         if (!is_sub) {
-            if (self.last_pos.items.len < self.bytecode.instructions.items.len) {
-                try self.last_pos.resize(self.allocator, self.bytecode.instructions.items.len);
-                try self.last_pos_gen.resize(self.allocator, self.bytecode.instructions.items.len);
+            if (self.split_states.items.len < self.bytecode.instructions.items.len) {
+                try self.split_states.resize(self.allocator, self.bytecode.instructions.items.len);
             }
             self.match_generation +%= 1;
         }
 
         const final_pc = if (is_sub) end_pc else self.bytecode.instructions.items.len;
+        const insts = self.bytecode.instructions.items;
+
+        var case_sensitive = self.options.case_sensitive;
+        var multiline = self.options.multiline;
+        var dot_matches_newline = self.options.dot_matches_newline;
+        const max_steps = self.options.max_steps;
 
         while (true) {
-            if (self.options.max_steps) |max| {
-                if (step_counter >= max) break;
+            if (max_steps) |max| {
+                if (step_counter >= max) {
+                    @branchHint(.unlikely);
+                    break;
+                }
                 step_counter += 1;
             }
 
@@ -2182,100 +2234,94 @@ pub const Vm = struct {
                     match_end = pos;
                     break;
                 } else {
-                    if (stack.items.len == 0) break;
+                    if (stack.items.len == 0) {
+                        @branchHint(.unlikely);
+                        break;
+                    }
                     const frame = stack.pop().?;
-                    backtrack(frame, &captures, &pc, &pos, subroutine_stack, &self.options);
+                    backtrack(frame, captures.items, &pc, &pos, subroutine_stack, &self.options);
                     continue;
                 }
             }
 
-            const inst = self.bytecode.instructions.items[pc];
+            const inst = insts[pc];
 
             switch (inst) {
                 .Char => |pat| {
                     var matches = false;
                     if (pos < input.len) {
                         const ch = input[pos];
-                        if (self.options.case_sensitive or ch >= 128 or pat >= 128) {
+                        if (case_sensitive or ch >= 128 or pat >= 128) {
                             matches = ch == pat;
                         } else {
-                            matches = std.ascii.toLower(ch) == std.ascii.toLower(pat);
+                            matches = (ch | 0x20) == (pat | 0x20);
                         }
                     }
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matches, 1)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matches, 1)) break;
                 },
-                .String => |pat| {
+                .String => |idx| {
+                    const pat = self.bytecode.strings.items[idx];
                     var matches = false;
                     var advance_len: usize = 0;
                     if (pos + pat.len <= input.len) {
                         const slice = input[pos .. pos + pat.len];
-                        if (self.options.case_sensitive) {
+                        if (case_sensitive) {
                             matches = std.mem.eql(u8, slice, pat);
                             advance_len = pat.len;
                         } else {
-                            // Case-insensitive: check ASCII chars with toLower
-                            matches = true;
-                            for (pat, slice) |p, s| {
-                                if (p >= 128 or s >= 128) {
-                                    if (p != s) {
-                                        matches = false;
-                                        break;
-                                    }
-                                } else if (std.ascii.toLower(p) != std.ascii.toLower(s)) {
-                                    matches = false;
-                                    break;
-                                }
-                            }
+                            // Case-insensitive: SIMD-accelerated for ASCII
+                            matches = asciiEqlIgnoreCaseSimd(pat, slice);
                             advance_len = pat.len;
                         }
                     }
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matches, advance_len)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matches, advance_len)) break;
                 },
                 .CharUtf8 => |cp| {
-                    if (!tryMatchOpt(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchCharUtf8(input, pos, cp, self.options.case_sensitive))) break;
+                    if (!tryMatchOpt(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matchCharUtf8(input, pos, cp, case_sensitive))) break;
                 },
                 .Any => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos < input.len and (self.options.dot_matches_newline or input[pos] != '\n'), 1)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, pos < input.len and (dot_matches_newline or input[pos] != '\n'), 1)) break;
                 },
                 .CharClass => |cc| {
-                    if (!tryMatchOpt(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchCharClass(cc, input, pos, self.options.case_sensitive))) break;
+                    if (!tryMatchOpt(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matchCharClass(cc, input, pos, case_sensitive))) break;
                 },
                 .UnicodeProperty => |p| {
-                    if (!tryMatchOpt(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchUnicodeProperty(input, pos, p.property, p.negated))) break;
+                    if (!tryMatchOpt(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matchUnicodeProperty(input, pos, p.property, p.negated))) break;
                 },
                 .GraphemeCluster => {
-                    if (!tryMatchOpt(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchGraphemeCluster(input, pos))) break;
+                    if (!tryMatchOpt(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matchGraphemeCluster(input, pos))) break;
                 },
                 .Newline => {
-                    if (!tryMatchOpt(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchNewline(input, pos))) break;
+                    if (!tryMatchOpt(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matchNewline(input, pos))) break;
                 },
                 .ResetMatchStart => {
                     captures.items[0] = pos;
                     pc += 1;
                 },
                 .NotNewline => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos < input.len and input[pos] != '\n', 1)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, pos < input.len and input[pos] != '\n', 1)) break;
                 },
                 .NotVerticalWhitespace => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos < input.len and isLineEndingChar(input, pos) == null, 1)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, pos < input.len and isLineEndingChar(input, pos) == null, 1)) break;
                 },
                 .Split => |target| {
                     if (!is_sub) {
-                        if (self.last_pos_gen.items[pc] == self.match_generation and self.last_pos.items[pc] == pos) {
+                        const state = &self.split_states.items[pc];
+                        if (state.gen == self.match_generation and state.pos == pos) {
                             pc = target;
                             continue;
                         }
-                        self.last_pos_gen.items[pc] = self.match_generation;
-                        self.last_pos.items[pc] = pos;
+                        state.gen = self.match_generation;
+                        state.pos = pos;
                     }
                     try stack.append(self.allocator, .{
                         .pc = target,
                         .pos = pos,
-                        .capture_slot = SENTINEL,
+                        .capture_slot = CAP_SENTINEL,
                         .capture_old_value = SENTINEL,
-                        .paired_capture_slot = SENTINEL,
+                        .paired_capture_slot = CAP_SENTINEL,
                         .paired_capture_old_value = SENTINEL,
-                        .subroutine_stack_len = subroutine_stack.items.len,
+                        .subroutine_stack_len = @intCast(subroutine_stack.items.len),
                         .options = snapshotFlags(self.options),
                     });
                     pc += 1;
@@ -2289,16 +2335,16 @@ pub const Vm = struct {
                     var frame = Frame{
                         .pc = pc + 1,
                         .pos = pos,
-                        .capture_slot = slot,
+                        .capture_slot = @intCast(slot),
                         .capture_old_value = old_val orelse SENTINEL,
-                        .paired_capture_slot = SENTINEL,
+                        .paired_capture_slot = CAP_SENTINEL,
                         .paired_capture_old_value = SENTINEL,
-                        .subroutine_stack_len = subroutine_stack.items.len,
+                        .subroutine_stack_len = @intCast(subroutine_stack.items.len),
                         .options = snapshotFlags(self.options),
                     };
                     if (slot % 2 == 1) {
                         const start_slot = slot - 1;
-                        frame.paired_capture_slot = start_slot;
+                        frame.paired_capture_slot = @intCast(start_slot);
                         frame.paired_capture_old_value = captures.items[start_slot] orelse SENTINEL;
                     }
                     try stack.append(self.allocator, frame);
@@ -2314,7 +2360,10 @@ pub const Vm = struct {
                     break;
                 },
                 .SetOption => |opts| {
-                    self.options = opts;
+                    applyFlagsSnapshot(opts, &self.options);
+                    case_sensitive = self.options.case_sensitive;
+                    multiline = self.options.multiline;
+                    dot_matches_newline = self.options.dot_matches_newline;
                     pc += 1;
                 },
                 .AtomicStart => {
@@ -2347,31 +2396,31 @@ pub const Vm = struct {
                     }
                 },
                 .Backref => |group| {
-                    if (!tryMatchOpt(stack, &captures, &pc, &pos, subroutine_stack, &self.options, matchBackref(input, pos, captures.items, group, self.options.case_sensitive))) break;
+                    if (!tryMatchOpt(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, matchBackref(input, pos, captures.items, group, case_sensitive))) break;
                 },
                 .WordBoundary => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, checkWordBoundary(input, pos), 0)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, checkWordBoundary(input, pos), 0)) break;
                 },
                 .NotWordBoundary => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, !checkWordBoundary(input, pos), 0)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, !checkWordBoundary(input, pos), 0)) break;
                 },
                 .AssertStart => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, checkAssertStart(pos, input, self.options.multiline), 0)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, checkAssertStart(pos, input, multiline), 0)) break;
                 },
                 .AssertEnd => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, checkAssertEnd(pos, input, self.options.multiline), 0)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, checkAssertEnd(pos, input, multiline), 0)) break;
                 },
                 .AssertStringStart => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos == 0, 0)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, pos == 0, 0)) break;
                 },
                 .AssertStringEnd => {
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, pos == input.len, 0)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, pos == input.len, 0)) break;
                 },
                 .AssertStringEndAllowNewline => {
                     const at_end = pos == input.len;
                     const before_lf = pos + 1 == input.len and input[pos] == '\n';
                     const before_crlf = pos + 2 == input.len and input[pos] == '\r' and input[pos + 1] == '\n';
-                    if (!tryMatch(stack, &captures, &pc, &pos, subroutine_stack, &self.options, at_end or before_lf or before_crlf, 0)) break;
+                    if (!tryMatch(stack, captures.items, &pc, &pos, subroutine_stack, &self.options, at_end or before_lf or before_crlf, 0)) break;
                 },
                 .AssertMatchStart => {
                     if (is_sub) {
@@ -2381,7 +2430,7 @@ pub const Vm = struct {
                             pc += 1;
                         } else {
                             if (stack.items.len == 0) break;
-                            backtrack(stack.pop().?, &captures, &pc, &pos, subroutine_stack, &self.options);
+                            backtrack(stack.pop().?, captures.items, &pc, &pos, subroutine_stack, &self.options);
                         }
                     }
                 },
@@ -2392,7 +2441,7 @@ pub const Vm = struct {
                     if (sub_result.matched) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(stack, captures.items, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertForwardNegative => {
@@ -2402,7 +2451,7 @@ pub const Vm = struct {
                     if (!sub_result.matched) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(stack, captures.items, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertForwardEnd => {
@@ -2434,7 +2483,7 @@ pub const Vm = struct {
                     if (success) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(stack, captures.items, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertBackwardNegative => |width| {
@@ -2463,7 +2512,7 @@ pub const Vm = struct {
                     if (success) {
                         pc = epc + 1;
                     } else {
-                        if (!maybeBacktrack(stack, &captures, &pc, &pos, subroutine_stack, &self.options)) break;
+                        if (!maybeBacktrack(stack, captures.items, &pc, &pos, subroutine_stack, &self.options)) break;
                     }
                 },
                 .AssertBackwardEnd => {
@@ -2550,9 +2599,19 @@ pub const Vm = struct {
         if (self.bytecode.has_skip_table) {
             const prefix_len = self.bytecode.prefix_len;
             const skip_table = self.bytecode.skip_table;
+            const prefix_idx = self.bytecode.instructions.items[0].String;
+            const prefix = self.bytecode.strings.items[prefix_idx];
+            const case_sensitive = self.options.case_sensitive;
             var start: usize = from_pos;
             while (start + prefix_len <= input.len) {
-                if (try self.tryAt(input, start, fast)) |result| return result;
+                const slice = input[start .. start + prefix_len];
+                const prefix_matches = if (case_sensitive)
+                    std.mem.eql(u8, slice, prefix)
+                else
+                    asciiEqlIgnoreCaseSimd(prefix, slice);
+                if (prefix_matches) {
+                    if (try self.tryAt(input, start, fast)) |result| return result;
+                }
                 if (start + prefix_len >= input.len) break;
                 start += skip_table[input[start + prefix_len]];
             }
